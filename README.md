@@ -28,7 +28,7 @@ embed or ship Tor):
 
 ## Why this matters
 
-[Riptide](../riptide) documents "no IP anonymity by default" and "incomplete metadata privacy" as
+[Riptide](https://github.com/SethMorrowSoftware/RipTide) documents "no IP anonymity by default" and "incomplete metadata privacy" as
 open, unsolved items in its threat model (its rung-4 adversary). OnionXT is the direct answer:
 route Riptide's transport through Tor and swap DHT rendezvous for onion-service rendezvous, and the
 IP-layer metadata the DHT and direct peer connections leak simply stops being emitted. OnionXT is
