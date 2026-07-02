@@ -342,6 +342,18 @@ private command demoSetStatus pField, pText, pColorName
    put pText into field pField
 end demoSetStatus
 
+private function demoConnectHint pMsg
+   -- A raw socket-connect failure is cryptic (Windows reports WSAECONNREFUSED as
+   -- "Error 10061"; other platforms say "connection refused"). All of them mean
+   -- the same thing: nothing is listening on that port. Add one actionable line
+   -- pointing at the always-visible torrc reference so the demo guides the fix.
+   if "10061" is in pMsg or "refused" is in pMsg or "connection" is in pMsg then
+      return pMsg & return & \
+         "Connection refused: no tor daemon on that port. Start tor and enable the control port (torrc reference below); Tor Browser uses 9151."
+   end if
+   return pMsg
+end demoConnectHint
+
 private command demoAppendLog pField, pText
    -- Append a line and scroll to the bottom (formattedHeight is the full content
    -- height; setting scroll past the max clamps to the bottom).
@@ -364,9 +376,9 @@ private command demoBuildStatusTab
    demoMakeInput "stat:ctl", "348,163,440,189", kDemoDefaultControlPort, ""
    demoMakeButton "stat:connect", "468,161,588,191", "Connect"
    demoMakeButton "stat:disconnect", "596,161,716,191", "Disconnect"
-   demoMakeLabel "stat:detail", "24,206,796,244", "not connected"
-   demoMakeLabel "stat:version", "24,250,796,272", "version: " & oxVersion()
-   demoMakeHint "stat:torrc", "24,292,796,400", \
+   demoMakeLabel "stat:detail", "24,206,796,262", "not connected"
+   demoMakeLabel "stat:version", "24,268,796,290", "version: " & oxVersion()
+   demoMakeHint "stat:torrc", "24,300,796,408", \
       "Needs a tor daemon reachable on loopback. Reference torrc:" & return & \
       "    SocksPort 9050" & return & "    ControlPort 9051" & return & \
       "    CookieAuthentication 1" & return & \
@@ -389,7 +401,7 @@ private command handleStat pRole
       put the result into tError
       if tError is not empty then
          put "failed" into sConnState
-         demoSetStatus "stat:detail", tError, "fail"
+         demoSetStatus "stat:detail", demoConnectHint(tError), "fail"
          demoUpdateStatusBar
          demoUpdateButtons
       end if
@@ -707,7 +719,7 @@ on onStatus pKind, pInfo
          put "version: " & oxVersion() into field "stat:version"
       else if pInfo begins with "authfailed" or pInfo begins with "error" then
          put "failed" into sConnState
-         demoSetStatus "stat:detail", pInfo, "fail"
+         demoSetStatus "stat:detail", demoConnectHint(pInfo), "fail"
       else if pInfo is "disconnected" then
          put "disconnected" into sConnState
          demoSetStatus "stat:detail", "disconnected", "muted"
