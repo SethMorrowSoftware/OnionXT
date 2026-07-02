@@ -7,12 +7,13 @@
 -- the SOCKS5 and control clients are engine socket I/O, and base32 / the
 -- ed25519 scalar clamp are pure byte manipulation.
 --
--- STATUS: designed and statically reasoned against the byte- and line-level
--- specs in docs/02-socks5-client.md, docs/03-control-port.md and
--- docs/04-onion-rendezvous.md, and against a grounded reading of the LiveCode
--- socket idioms. It NEEDS AN ON-ENGINE PASS against a real tor daemon before any
--- handshake can be called "working" (CLAUDE.md). Points that could only be
--- settled on the engine are marked "VERIFY:" in comments.
+-- STATUS: implemented AND run on a real OXT engine against a live tor daemon.
+-- The core paths are confirmed on-engine: dialing through the SOCKS proxy, the
+-- control-port connect + SAFECOOKIE auth, GETINFO / SETEVENTS, publishing a v3
+-- onion service, accepting an inbound (Tor-forwarded) connection, streaming data
+-- both ways, and bootstrap/HS_DESC events. The only path NOT yet exercised is the
+-- optional Mode B (launching a bundled tor via `open process`), still flagged
+-- "VERIFY:" below. The pure-compute paths are pinned by tools/onion-kat.py.
 --
 -- Conventions (see CLAUDE.md): public API oxPascalCase; locals t..., params
 -- p..., script-locals s..., constants k...; SOCKS5 is BINARY (byte / numToByte /
@@ -138,8 +139,9 @@ end oxSetControlPassword
 
 command oxSetCallbackOwner pObjectLongId
    -- The object whose script holds the app callbacks. If unset, callbacks
-   -- dispatch to the topStack (VERIFY: confirm the topStack is the app's stack
-   -- in your setup; setting this explicitly removes the ambiguity).
+   -- dispatch to the topStack; setting this explicitly (as the demo does) removes
+   -- any ambiguity about which stack. Confirmed on-engine: with an explicit owner,
+   -- onStatus / onPeer / onStreamData all resolve and fire.
    put pObjectLongId into sCallbackOwner
 end oxSetCallbackOwner
 
@@ -279,8 +281,9 @@ command oxCtlLine pSocketID, pData
       exit oxCtlLine            -- a stale socket; ignore
    end if
    local tLine
-   -- Control replies are ASCII; decode as text, then strip the line terminator
-   -- defensively (VERIFY: whether `read until crlf` includes the CRLF).
+   -- Control replies are ASCII; decode as text, then strip the line terminator.
+   -- Confirmed on-engine: `read until crlf` returns the trailing CRLF and
+   -- oxStripLineEnd removes it, so auth / GETINFO / events all parse correctly.
    put textDecode(pData, "UTF-8") into tLine
    put oxStripLineEnd(tLine) into tLine
 
@@ -797,9 +800,9 @@ command oxSocksReplyDone pSocketID, pData
    put "connected" into sStreams[tHandle]["state"]
    oxInvokeStreamCallback tHandle, "open", empty
    -- Begin the persistent read; each inbound chunk is delivered as "data".
-   -- VERIFY: the no-quantifier `read ... with message` streams available bytes;
-   -- if the engine instead blocks until EOF, switch to a bounded `for N` loop
-   -- driven by socketClosed for the tail.
+   -- Confirmed on-engine: the no-quantifier `read ... with message` streams
+   -- available bytes as they arrive (a dialed SOCKS tunnel and an inbound onion
+   -- HTTP request both deliver chunk by chunk); it does not block to EOF.
    read from socket pSocketID with message "oxStreamData"
 end oxSocksReplyDone
 
@@ -977,9 +980,10 @@ private function oxStartService pVirtualPort, pLocalPort
    put empty into sServices[tHandle]["privateKey"]
    put false into sServices[tHandle]["ready"]
    if sLocalToService[pLocalPort] is empty then
-      -- Bind loopback only. VERIFY: the classic `accept connections on port`
-      -- has no bind-address argument and may listen on 0.0.0.0; oxPeerAccepted
+      -- Bind loopback only. The classic `accept connections on port` has no
+      -- bind-address argument (may listen on all interfaces), so oxPeerAccepted
       -- enforces loopback by rejecting any non-loopback peer before reading.
+      -- Confirmed on-engine: Tor-forwarded onion connections are accepted here.
       accept connections on port pLocalPort with message "oxPeerAccepted"
       if the result is not empty then
          -- The listener did not bind (most often the local port is already in use

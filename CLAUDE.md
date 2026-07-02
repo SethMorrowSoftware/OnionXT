@@ -304,10 +304,10 @@ it. Therefore:
 
 ## As-built notes (v1 implementation)
 
-The library is implemented in one file, `src/onionxt.livecodescript`. It is designed and statically
-reasoned against the specs; it has NOT run on an OXT engine, so the socket behaviours below are design
-decisions to confirm, not confirmed facts. Each is flagged `VERIFY:` in the source. Record the result
-of the on-engine pass here as it is learned (that is what this section is for).
+The library is implemented in one file, `src/onionxt.livecodescript`, and has now RUN ON A REAL OXT
+ENGINE against a live tor daemon (and Tor Browser). The core socket behaviours below are confirmed
+on-engine; the one path not yet exercised is the optional Mode B tor launch (still `VERIFY:` in the
+source). Keep recording on-engine results here as they are learned (that is what this section is for).
 
 Design decisions worth knowing before you touch the code:
 
@@ -335,19 +335,42 @@ Design decisions worth knowing before you touch the code:
   It routes integer division/modulo through `oxIntDiv`/`oxIntMod` and powers through `oxPow2` (some OXT
   parsers reject `^` in a compound expression). The KAT in `tools/onion-kat.py` pins the answers.
 
-The on-engine `VERIFY:` checklist (settle each against a real engine + tor daemon):
+Confirmed on-engine (promoted from `VERIFY:`):
 
-1. `read ... until crlf` - is the trailing CRLF in the returned data? (`oxStripLineEnd` strips it either way.)
-2. `read ... for N with message` - exactly N raw bytes, no codepoint reinterpretation, on a binary socket?
-3. The no-quantifier `read ... with message oxStreamData` streams available bytes (does not block to EOF).
-4. The accepted-socket id format from `accept connections` (host:port vs host:port|N) - `oxHostOfSocket`
-   and `oxGuessService` parse it; loopback is enforced by rejecting any non-127.0.0.1 peer.
-5. `close socket <localPort>` actually stops the listener; `the openSockets` lists the ids we close.
-6. `dispatch [function] ... to <owner>` resolves app callbacks and `sx*` and reports `"unhandled"` for absent.
-7. Socket messages (`socketError`/`socketClosed`/`socketTimeout`) reach the library object; `socketTimeout` repeats.
-8. `the processId` / `open process` for the optional Mode B tor launch.
+1. `read ... until crlf` returns the trailing CRLF; `oxStripLineEnd` removes it. Control auth / GETINFO /
+   events all parse correctly.
+2. `read ... for N with message` delivers exactly N raw bytes on a binary socket (the SOCKS handshake).
+3. The no-quantifier `read ... with message oxStreamData` streams available bytes as they arrive and does
+   NOT block to EOF - a dialed SOCKS tunnel and an inbound onion HTTP request both deliver chunk by chunk.
+4. `accept connections on port` accepts Tor-forwarded loopback connections; the loopback guard now
+   accepts every loopback spelling (`127.x` / `::1` / `localhost` / empty), not just "127.0.0.1".
+5. Publish -> serve -> remove works; `oxRemoveService` / `oxShutdown` close the listener and DEL_ONION.
+6. `dispatch ... to <owner>` resolves app callbacks (onStatus / onPeer / onStreamData) and the `sx*`
+   primitives (SAFECOOKIE composes `sxHmacSha256`); an absent handler is a clean miss.
+7. `socketError` reaches the library and is surfaced / failed-closed (e.g. 10061 refused, 10013 listen
+   denied); `socketClosed` cleans up. (The `socketTimeout`-repeats detail stays the documented
+   assumption; no stalled-handshake case was forced.)
 
-Once the phase-4 round trip runs, promote the confirmed items from `VERIFY:` to fact here and in the docs.
+Still `VERIFY:` (not yet exercised):
+
+8. `the processId` / `open process` for the optional Mode B tor launch (the default is assume-running).
+
+New hard-won lessons from bring-up (each cost a real debugging round; mirrored in the README/docs
+troubleshooting):
+
+- **An ephemeral `ADD_ONION` service dies with its control connection.** A transient control-socket drop
+  (or a reconnect) un-publishes it while its descriptor lingers in the DHT ~3h, so a later visit hits
+  `Unable to find any hidden service associated identity key` at rendezvous (an empty response). OnionXT
+  now passes `Flags=Detach` by default; teardown still `DEL_ONION`s it.
+- **`accept connections on port` sets `the result` on a bind failure - check it.** A reserved or blocked
+  local port (Windows `Error 10013` WSAEACCES: Hyper-V / WSL2 / Docker reserve TCP ranges; `10048` is
+  in-use) otherwise silently produces an onion whose traffic Tor forwards to a dead port. `oxStartService`
+  now fails closed with the error; pick another local port (keep the virtual port 80).
+- **`STATUS_CLIENT BOOTSTRAP` events only fire WHILE bootstrapping.** Connecting to a tor already at 100%
+  delivers none, so a UI seeded at 0 stays there. Query `GETINFO status/bootstrap-phase` once on connect
+  to seed it, then let the events update it.
+- **The control port must be enabled explicitly** (`ControlPort` + an auth method in `torrc`): tor opens
+  SOCKS by default but no control port, and Tor Browser exposes none. A refused connect is `Error 10061`.
 
 ## Git / workflow
 
