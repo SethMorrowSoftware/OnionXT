@@ -182,7 +182,7 @@ command oxConnectControl
    put empty into sCtlQueue
    -- Bound the connect/handshake so a stalled daemon fails cleanly.
    set the socketTimeoutInterval to kOxHandshakeTimeout
-   open socket to tSocketID with message oxCtlOpened
+   open socket to tSocketID with message "oxCtlOpened"
    -- A watchdog independent of the (repeating) socketTimeout: if we are not
    -- authenticated within the deadline, tear the connection down.
    send ("oxCtlDeadline " & quote & tSocketID & quote) to me in kOxHandshakeTimeout milliseconds
@@ -231,7 +231,7 @@ command oxCtlOpened pSocketID
    put "protocolinfo" into sControlState
    oxStatusUpdate "control", "connected"
    -- One outstanding CRLF read at a time; re-armed at the end of oxCtlLine.
-   read from socket pSocketID until crlf with message oxCtlLine
+   read from socket pSocketID until crlf with message "oxCtlLine"
    oxCtlSend "PROTOCOLINFO 1", "protocolinfo"
 end oxCtlOpened
 
@@ -281,7 +281,7 @@ command oxCtlLine pSocketID, pData
    -- Control replies are ASCII; decode as text, then strip the line terminator
    -- defensively (VERIFY: whether `read until crlf` includes the CRLF).
    put textDecode(pData, "UTF-8") into tLine
-   oxStripLineEnd tLine
+   put oxStripLineEnd(tLine) into tLine
 
    if sCtlInData then
       -- Inside a 250+ CmdData block: a lone "." ends it; other lines are data
@@ -333,7 +333,7 @@ end oxCtlLine
 private command oxCtlRearm pSocketID
    -- Keep exactly one read outstanding, but only while the socket is still ours.
    if pSocketID is sControlSocket then
-      read from socket pSocketID until crlf with message oxCtlLine
+      read from socket pSocketID until crlf with message "oxCtlLine"
    end if
 end oxCtlRearm
 
@@ -601,7 +601,7 @@ command oxDial pHost, pPort
    put empty into sStreams[tHandle]["callback"]
    put tHandle into sSockToStream[tSocketID]
    set the socketTimeoutInterval to kOxHandshakeTimeout
-   open socket to tSocketID with message oxSocksOpened
+   open socket to tSocketID with message "oxSocksOpened"
    send ("oxStreamDeadline " & tHandle) to me in kOxHandshakeTimeout milliseconds
    return tHandle
 end oxDial
@@ -652,7 +652,7 @@ command oxSocksOpened pSocketID
    end if
    put "greeting" into sStreams[tHandle]["state"]
    write numToByte(5) & numToByte(1) & numToByte(0) to socket pSocketID
-   read from socket pSocketID for 2 with message oxSocksMethod
+   read from socket pSocketID for 2 with message "oxSocksMethod"
 end oxSocksOpened
 
 command oxSocksMethod pSocketID, pData
@@ -701,7 +701,7 @@ command oxSocksMethod pSocketID, pData
    -- Read the fixed 4-byte reply head (VER REP RSV ATYP); the BND.ADDR that
    -- follows is variable and framed by ATYP (docs/02 step 3).
    put "replyhead" into sStreams[tHandle]["state"]
-   read from socket pSocketID for 4 with message oxSocksReplyHead
+   read from socket pSocketID for 4 with message "oxSocksReplyHead"
 end oxSocksMethod
 
 command oxSocksReplyHead pSocketID, pData
@@ -730,13 +730,13 @@ command oxSocksReplyHead pSocketID, pData
    -- frame past it so the socket is left at the start of the tunnel payload.
    if tAtyp is 1 then
       put "replyrest" into sStreams[tHandle]["state"]
-      read from socket pSocketID for 6 with message oxSocksReplyDone     -- 4 + 2
+      read from socket pSocketID for 6 with message "oxSocksReplyDone"     -- 4 + 2
    else if tAtyp is 4 then
       put "replyrest" into sStreams[tHandle]["state"]
-      read from socket pSocketID for 18 with message oxSocksReplyDone    -- 16 + 2
+      read from socket pSocketID for 18 with message "oxSocksReplyDone"    -- 16 + 2
    else if tAtyp is 3 then
       put "replylen" into sStreams[tHandle]["state"]
-      read from socket pSocketID for 1 with message oxSocksReplyLen
+      read from socket pSocketID for 1 with message "oxSocksReplyLen"
    else
       oxStreamFail tHandle, "SOCKS reply has an unknown address type (" & tAtyp & ")"
    end if
@@ -756,7 +756,7 @@ command oxSocksReplyLen pSocketID, pData
    local tLen
    put byteToNum(byte 1 of pData) + 2 into tLen     -- address bytes + 2 port bytes
    put "replyrest" into sStreams[tHandle]["state"]
-   read from socket pSocketID for tLen with message oxSocksReplyDone
+   read from socket pSocketID for tLen with message "oxSocksReplyDone"
 end oxSocksReplyLen
 
 command oxSocksReplyDone pSocketID, pData
@@ -773,7 +773,7 @@ command oxSocksReplyDone pSocketID, pData
    -- VERIFY: the no-quantifier `read ... with message` streams available bytes;
    -- if the engine instead blocks until EOF, switch to a bounded `for N` loop
    -- driven by socketClosed for the tail.
-   read from socket pSocketID with message oxStreamData
+   read from socket pSocketID with message "oxStreamData"
 end oxSocksReplyDone
 
 command oxStreamData pSocketID, pData
@@ -789,7 +789,7 @@ command oxStreamData pSocketID, pData
    end if
    -- Re-arm only if the stream is still live (the callback may have closed it).
    if sSockToStream[pSocketID] is not empty then
-      read from socket pSocketID with message oxStreamData
+      read from socket pSocketID with message "oxStreamData"
    end if
 end oxStreamData
 
@@ -936,7 +936,7 @@ private function oxStartService pVirtualPort, pLocalPort
       -- Bind loopback only. VERIFY: the classic `accept connections on port`
       -- has no bind-address argument and may listen on 0.0.0.0; oxPeerAccepted
       -- enforces loopback by rejecting any non-127.0.0.1 peer before reading.
-      accept connections on pLocalPort with message oxPeerAccepted
+      accept connections on port pLocalPort with message "oxPeerAccepted"
       put true into sServices[tHandle]["listening"]
    end if
    put tHandle into sLocalToService[pLocalPort]
@@ -1016,7 +1016,7 @@ command oxPeerAccepted pSocketID
    -- before there is a callback to receive it.
    oxDispatch sPeerCallback, tHandle, oxGuessService(pSocketID), tPeerHost
    if sSockToStream[pSocketID] is not empty then
-      read from socket pSocketID with message oxStreamData
+      read from socket pSocketID with message "oxStreamData"
    end if
 end oxPeerAccepted
 
@@ -1117,6 +1117,30 @@ private function oxNormalizeAddress pOnionAddress
    return tCore
 end oxNormalizeAddress
 
+private function oxPow2 pN
+   -- 2 to the pN, as an exact integer, WITHOUT the ^ operator (some xTalk
+   -- parsers reject `^` in a div/mod expression). pN is small in base32 (0..12),
+   -- so this is a few multiplies and stays well within exact-integer range.
+   local tR, tI
+   put 1 into tR
+   repeat with tI = 1 to pN
+      multiply tR by 2
+   end repeat
+   return tR
+end oxPow2
+
+private function oxIntDiv pA, pB
+   -- Integer division (floor, for the non-negative operands base32 uses) WITHOUT
+   -- the `div` operator, to sidestep any xTalk parser that mishandles div/mod/^
+   -- inside a compound expression. Operands here are small (base32 bit math).
+   return trunc(pA / pB)
+end oxIntDiv
+
+private function oxIntMod pA, pB
+   -- pA modulo pB WITHOUT the `mod` operator (see oxIntDiv).
+   return pA - pB * oxIntDiv(pA, pB)
+end oxIntMod
+
 private function oxBase32Encode pData
    -- RFC 4648 base32, lowercase, no padding. Pure bit-packing: accumulate input
    -- bytes MSB-first into a small buffer and emit 5-bit groups. The buffer is
@@ -1132,14 +1156,14 @@ private function oxBase32Encode pData
       add 8 to tBits
       repeat while tBits >= 5
          subtract 5 from tBits
-         put (tValue div (2 ^ tBits)) mod 32 into tIndex
+         put oxIntMod(oxIntDiv(tValue, oxPow2(tBits)), 32) into tIndex
          put char (tIndex + 1) of kOxBase32Alphabet after tOut
       end repeat
-      put tValue mod (2 ^ tBits) into tValue        -- keep only the pending bits
+      put oxIntMod(tValue, oxPow2(tBits)) into tValue        -- keep only the pending bits
    end repeat
    if tBits > 0 then
       -- Left-align the final partial group and emit it (canonical no-pad tail).
-      put (tValue * (2 ^ (5 - tBits))) mod 32 into tIndex
+      put oxIntMod(tValue * oxPow2(5 - tBits), 32) into tIndex
       put char (tIndex + 1) of kOxBase32Alphabet after tOut
    end if
    return tOut
@@ -1164,9 +1188,9 @@ private function oxBase32Decode pText
       add 5 to tBits
       if tBits >= 8 then
          subtract 8 from tBits
-         put (tValue div (2 ^ tBits)) mod 256 into tByteOut
+         put oxIntMod(oxIntDiv(tValue, oxPow2(tBits)), 256) into tByteOut
          put numToByte(tByteOut) after tOut
-         put tValue mod (2 ^ tBits) into tValue
+         put oxIntMod(tValue, oxPow2(tBits)) into tValue
       end if
    end repeat
    return tOut
@@ -1208,9 +1232,11 @@ private function oxExpandedKeyFromSeed pSeed
    -- Clamp the scalar a = h[0:32]: a[0] &= 0xF8, a[31] &= 0x7F, a[31] |= 0x40;
    -- RH = h[32:64]; expanded = a || RH (docs/04). Byte masking only.
    local tByte1, tByte32
-   put bitAnd(byteToNum(byte 1 of tHash), 248) into tByte1
-   put bitAnd(byteToNum(byte 32 of tHash), 127) into tByte32
-   put bitOr(tByte32, 64) into tByte32
+   -- bitAnd / bitOr are OPERATORS in LiveCode (x bitAnd y), not functions, so
+   -- they are written infix, not bitAnd(x, y).
+   put (byteToNum(byte 1 of tHash) bitAnd 248) into tByte1
+   put (byteToNum(byte 32 of tHash) bitAnd 127) into tByte32
+   put (tByte32 bitOr 64) into tByte32
    return numToByte(tByte1) & (byte 2 to 31 of tHash) & numToByte(tByte32) & (byte 33 to 64 of tHash)
 end oxExpandedKeyFromSeed
 
@@ -1244,7 +1270,7 @@ command oxTransportDial pAddress, pPort
       put pPort into tPort
    end if
    put pAddress into tHost
-   if tHost does not end with ".onion" then
+   if not (tHost ends with ".onion") then
       local tPub
       if the number of chars of tHost is 64 then
          put oxHexToBytes(tHost) into tPub
@@ -1582,11 +1608,14 @@ private function oxCrlf
    return numToChar(13) & numToChar(10)
 end oxCrlf
 
-private command oxStripLineEnd @pLine
+private function oxStripLineEnd pLine
    -- Strip a trailing LF and/or CR from a decoded reply line, in either order.
-   repeat while the last char of pLine is numToChar(10) or the last char of pLine is numToChar(13)
+   -- A plain function (returns the trimmed line) rather than a @-by-reference
+   -- command, to avoid the less-common reference-parameter construct.
+   repeat while pLine is not empty and (the last char of pLine is numToChar(10) or the last char of pLine is numToChar(13))
       delete the last char of pLine
    end repeat
+   return pLine
 end oxStripLineEnd
 
 private function oxFieldAfter pText, pMarker
@@ -1619,7 +1648,8 @@ private function oxQuotedValueAfter pText, pMarker
    put char (tPos + the number of chars of pMarker) to -1 of pText into tRest
    if char 1 of tRest is not quote then
       -- Unquoted value: take up to the next space (save/restore itemDelimiter).
-      local tSaved, tOut
+      -- tOut is already declared at the handler top; only tSaved is new here.
+      local tSaved
       put the itemDelimiter into tSaved
       set the itemDelimiter to space
       put item 1 of tRest into tOut
