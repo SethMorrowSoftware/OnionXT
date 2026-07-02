@@ -118,8 +118,13 @@ ADD_ONION ED25519-V3:<base64 expanded key> Port=80,127.0.0.1:8080
 ```
 
 Useful flags: `Flags=Detach` (service outlives the control connection), `Flags=DiscardPK` (do not
-return the key). Without `Detach`, the service dies when the control connection closes, which is often
-the right default for a session-scoped service.
+return the key). Without `Detach`, the service dies when the control connection closes - but its
+descriptor lingers in the DHT for ~3 hours, so a client that already fetched the descriptor still tries
+to connect and the service-side tor logs `Unable to find any hidden service associated identity key ...
+on rendezvous circuit` (an empty response to the visitor). Because a transient control-socket drop then
+silently un-publishes the onion, **OnionXT passes `Flags=Detach` by default** so a published service
+survives a reconnect; `oxRemoveService` / `oxShutdown` `DEL_ONION` it explicitly on teardown (a hard
+crash leaves it registered until `DEL_ONION` or a tor restart).
 
 Remove a service: `DEL_ONION <ServiceID>` (the `ServiceID`, without `.onion`) -> `250 OK`; `512` on a
 bad argument count, `552` if the `ServiceID` is unknown or was not created on this control connection
