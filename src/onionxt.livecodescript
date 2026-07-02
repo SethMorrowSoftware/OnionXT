@@ -363,6 +363,8 @@ private command oxCtlReplyComplete
       -- 250 OK expected; nothing to do on success.
    else if tReplyOp is "getinfo-version" then
       oxParseTorVersion sCtlReplyLines
+   else if tReplyOp is "getinfo-bootstrap" then
+      oxParseBootstrapPhase sCtlReplyLines
    else if tReplyOp is "add_onion" then
       oxHandleAddOnionReply tArg, sCtlReplyLines
    else if tReplyOp is "del_onion" then
@@ -476,6 +478,10 @@ private command oxHandleAuthResult pReply
       -- Subscribe to the events we care about and learn the tor version.
       oxCtlSend "SETEVENTS STATUS_CLIENT HS_DESC CIRC STREAM", "setevents"
       oxCtlSend "GETINFO version", "getinfo-version"
+      -- Query the CURRENT bootstrap phase once. STATUS_CLIENT BOOTSTRAP events
+      -- only fire WHILE tor is bootstrapping, so a daemon already at 100% when we
+      -- connect emits none and the UI would sit at 0. This one GETINFO seeds it.
+      oxCtlSend "GETINFO status/bootstrap-phase", "getinfo-bootstrap"
    else
       put "failed" into sControlState
       oxStatusUpdate "control", "authfailed: " & tLine
@@ -492,6 +498,26 @@ private command oxParseTorVersion pReply
       end if
    end repeat
 end oxParseTorVersion
+
+private command oxParseBootstrapPhase pReply
+   -- Reply to GETINFO status/bootstrap-phase, carrying the CURRENT bootstrap state
+   -- (unlike the STATUS_CLIENT event, which only fires while bootstrapping). Line:
+   --   250-status/bootstrap-phase=NOTICE BOOTSTRAP PROGRESS=100 TAG=done SUMMARY="..."
+   -- Parse PROGRESS= the same way as the live event so the UI is seeded on connect.
+   local tLine, tProgress
+   repeat for each line tLine in pReply
+      if "PROGRESS=" is in tLine then
+         put oxFieldAfter(tLine, "PROGRESS=") into tProgress
+         if tProgress is not empty and tProgress is an integer then
+            put tProgress into sBootstrap
+            oxStatusUpdate "bootstrap", tProgress
+            if tProgress is 100 then
+               oxStatusUpdate "ready", empty
+            end if
+         end if
+      end if
+   end repeat
+end oxParseBootstrapPhase
 
 command oxCtlDeadline pSocketID
    -- Handshake watchdog: if this control socket never reached authenticated,
