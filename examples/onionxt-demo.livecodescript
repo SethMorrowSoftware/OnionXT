@@ -61,6 +61,7 @@ local sBootPct              -- last bootstrap percent seen (0..100)
 local sDialStream           -- the Dial tab's stream handle, or empty
 local sDialOpen             -- true once the dial stream's "open" event arrived
 local sSvcHandle            -- the Service tab's published service handle, or empty
+local sHttpServed           -- array: peer stream handle -> true once its page is served
 
 on preOpenStack
    -- Size and centre the window, then build the whole UI in script (no IDE design
@@ -223,6 +224,23 @@ private command demoMakeLog pName, pRect
    set the dontWrap of field pName to false
    set the vScrollbar of field pName to true
 end demoMakeLog
+
+private command demoMakeEditor pName, pRect
+   -- An EDITABLE, monospace, wrapping, scrolling multi-line input (the page HTML).
+   create field pName
+   set the rect of field pName to pRect
+   set the text of field pName to empty
+   set the backgroundColor of field pName to demoColor("panel")
+   set the foregroundColor of field pName to demoColor("text")
+   set the borderColor of field pName to demoColor("border")
+   set the borderWidth of field pName to 1
+   set the threeD of field pName to false
+   set the opaque of field pName to true
+   set the lockText of field pName to false
+   set the textFont of field pName to kMono
+   set the dontWrap of field pName to false
+   set the vScrollbar of field pName to true
+end demoMakeEditor
 
 private command demoMakeButton pName, pRect, pLabel
    create button pName
@@ -505,14 +523,15 @@ on onDialStream pStream, pEvent, pData
 end onDialStream
 
 -- ==========================================================================
--- Tab: Service. Publish a v3 onion (docs/03/04), accept an inbound peer, and echo
--- bytes back. Requires the Status tab's control connection to be authenticated.
+-- Tab: Service. Publish a v3 onion (docs/03/04), accept an inbound peer, and
+-- serve it a small HTML page over HTTP so the onion is viewable in Tor Browser.
+-- Requires the Status tab's control connection to be authenticated.
 -- ==========================================================================
 
 private command demoBuildServiceTab
-   demoMakeTitle "svc:title", "24,100,796,124", "Publish an onion service"
+   demoMakeTitle "svc:title", "24,100,796,124", "Publish an onion service (a web page in Tor Browser)"
    demoMakeHint "svc:hint", "24,128,796,150", \
-      "Requires an authenticated control connection (Status tab). Reachable at a global .onion, no port forwarding."
+      "Needs an authenticated control connection (Status tab). Publish with virtual port 80, then open http://<address>.onion/ in Tor Browser."
    demoMakeLabel "svc:vLbl", "24,166,116,188", "Virtual port:"
    demoMakeInput "svc:vport", "120,163,200,189", 80, ""
    demoMakeLabel "svc:lLbl", "216,166,304,188", "Local port:"
@@ -520,12 +539,15 @@ private command demoBuildServiceTab
    demoMakeButton "svc:publish", "410,161,560,191", "Publish onion"
    demoMakeButton "svc:remove", "568,161,688,191", "Remove"
    demoMakeLabel "svc:status", "24,206,796,228", "not published"
-   demoMakeLabel "svc:addrLbl", "24,238,116,260", "Address:"
-   demoMakeValue "svc:address", "120,235,796,261"
-   demoMakeLog "svc:log", "24,274,796,500"
+   demoMakeLabel "svc:addrLbl", "24,236,116,258", "Address:"
+   demoMakeValue "svc:address", "120,233,796,259"
+   demoMakeLabel "svc:htmlLbl", "24,266,796,286", "Page served to each visitor ({{ADDRESS}} is replaced with the live address):"
+   demoMakeEditor "svc:html", "24,288,796,398"
+   put demoDefaultHtml() into field "svc:html"
+   demoMakeLog "svc:log", "24,408,796,500"
 
    demoRegisterTab "svc", \
-      "title,hint,vLbl,vport,lLbl,lport,publish,remove,status,addrLbl,address,log"
+      "title,hint,vLbl,vport,lLbl,lport,publish,remove,status,addrLbl,address,htmlLbl,html,log"
 end demoBuildServiceTab
 
 private command handleSvc pRole
@@ -567,23 +589,89 @@ private command demoRemoveService
    demoUpdateButtons
 end demoRemoveService
 
--- The peer callback: a remote peer reached our onion. Register a per-stream
--- callback and echo whatever it sends (the shape of examples/onion-roundtrip).
+-- The peer callback: a visitor (Tor Browser, curl, another OnionXT) reached our
+-- onion. Register a per-stream callback; the request arrives as "data" events.
 on onPeer pStream, pService, pPeerAddr
    oxSetStreamCallback pStream, "onSvcPeerStream"
-   demoAppendLog "svc:log", "peer connected from " & pPeerAddr
+   demoAppendLog "svc:log", "visitor connected from " & pPeerAddr
 end onPeer
 
 on onSvcPeerStream pStream, pEvent, pData
    if pEvent is "data" then
-      demoAppendLog "svc:log", "< " & (the number of bytes of pData) & " bytes (echoing back)"
-      oxWrite pStream, pData
+      -- Serve the page ONCE, on the first chunk that carries the HTTP request line.
+      -- Later chunks (the rest of the request) are ignored; the library keeps the
+      -- read armed, which drains them so our close is clean, not a reset.
+      if sHttpServed[pStream] is not true then
+         put true into sHttpServed[pStream]
+         demoServeHttp pStream, pData
+      end if
    else if pEvent is "closed" then
-      demoAppendLog "svc:log", "peer closed"
+      delete variable sHttpServed[pStream]
+      demoAppendLog "svc:log", "visitor disconnected"
    else if pEvent is "error" then
-      demoAppendLog "svc:log", "peer error: " & pData
+      delete variable sHttpServed[pStream]
+      demoAppendLog "svc:log", "visitor error: " & pData
    end if
 end onSvcPeerStream
+
+private command demoServeHttp pStream, pRequest
+   -- Answer an inbound HTTP request with a minimal, correct HTTP/1.1 response so
+   -- the onion renders in a browser. OnionXT moves the bytes; the HTTP framing is
+   -- ours (a real app would layer its own protocol here just the same).
+   local tCrlf, tBody, tBodyBytes, tHeaders, tReqLine
+   put numToChar(13) & numToChar(10) into tCrlf
+   put field "svc:html" into tBody
+   if tBody is empty then
+      put demoDefaultHtml() into tBody
+   end if
+   replace "{{ADDRESS}}" with (field "svc:address") in tBody
+   -- Content-Length must be the BYTE count of the (UTF-8) body, not the char count,
+   -- so the browser knows exactly how much body to read and renders immediately.
+   put textEncode(tBody, "UTF-8") into tBodyBytes
+   put "HTTP/1.1 200 OK" & tCrlf into tHeaders
+   put "Content-Type: text/html; charset=utf-8" & tCrlf after tHeaders
+   put "Content-Length: " & (the number of bytes of tBodyBytes) & tCrlf after tHeaders
+   put "Connection: close" & tCrlf after tHeaders
+   put tCrlf after tHeaders
+   oxWrite pStream, (textEncode(tHeaders, "UTF-8") & tBodyBytes)
+   -- Log the request's first line (decoded defensively; the callback is wrapped in
+   -- the library's try, but keep our own guard so a bad byte cannot skip the log).
+   put "(request)" into tReqLine
+   try
+      put line 1 of textDecode(pRequest, "UTF-8") into tReqLine
+   catch tErr
+   end try
+   demoAppendLog "svc:log", "visitor: " & tReqLine
+   demoAppendLog "svc:log", "served a " & (the number of bytes of tBodyBytes) & "-byte HTML page"
+   -- Close after a short delay (Connection: close): lets the synchronous write
+   -- flush and the rest of the request drain, so the browser never sees a truncated
+   -- response or a reset. demoFinishServe is public because `send` needs the message path.
+   send ("demoFinishServe " & pStream) to me in 400 milliseconds
+end demoServeHttp
+
+command demoFinishServe pStream
+   -- Deferred, idempotent close of a served HTTP connection.
+   delete variable sHttpServed[pStream]
+   oxCloseStream pStream
+end demoFinishServe
+
+private function demoDefaultHtml
+   -- A small self-contained page. HTML attributes use SINGLE quotes on purpose:
+   -- livecodescript string literals are double-quote-delimited with no escape, so a
+   -- double quote cannot appear inside one; HTML accepts single-quoted attributes.
+   local tH
+   put "<!doctype html>" & return into tH
+   put "<html>" & return after tH
+   put "<head><meta charset='utf-8'><title>OnionXT onion service</title></head>" & return after tH
+   put "<body style='font-family:system-ui,sans-serif;max-width:38em;margin:3em auto;padding:0 1em;line-height:1.5'>" & return after tH
+   put "<h1>It works.</h1>" & return after tH
+   put "<p>This page is served by an <strong>OnionXT</strong> demo onion service running inside an OpenXTalk / LiveCode app - no web server, no port forwarding, and no DNS.</p>" & return after tH
+   put "<p>You reached it at its self-authenticating v3 address:</p>" & return after tH
+   put "<pre style='white-space:pre-wrap;word-break:break-all;background:#f4f6fa;padding:.6em;border-radius:.4em'>{{ADDRESS}}</pre>" & return after tH
+   put "<p>That address is an ed25519 public key, so reaching it proved you connected to the holder of that key - no certificate authority involved.</p>" & return after tH
+   put "</body></html>" & return after tH
+   return tH
+end demoDefaultHtml
 
 -- ==========================================================================
 -- Tab: Address. Pure, offline helpers (docs/04): base32 + the address<->key
