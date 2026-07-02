@@ -221,6 +221,24 @@ future feature ever needs C-side state, use SodiumXT's generation-tagged handle-
 
 ## As-built notes
 
-Nothing built yet. Record on-engine and cross-library results here as they are learned (that is what this
-section is for): the exact trezor-crypto commit vendored, any upstream quirk, the confirmed accepted-key
-formats, and each `VERIFY:` promoted to fact once a CoinXT signature verifies externally.
+Record on-engine and cross-library results here as they are learned: the exact trezor-crypto commit
+vendored, any upstream quirk, the confirmed accepted-key formats, and each `VERIFY:` promoted to fact
+once a CoinXT signature verifies externally.
+
+**Phase 1, hash slice - DONE and verified (2026-07-02).** The FFI/build pipeline is proven end to end:
+
+- Vendored the trezor-crypto SHA-3 unit (`sha3.c/h`, `memzero.c/h`, `byte_order.h`, `options.h`) at
+  commit `230cfe37e4c5fefb6ca117725d261a7b3646a995` (see `native/vendor/VENDOR.md`; MIT `LICENSE`
+  shipped). Note `byte_order.h` is header-only (there is no `byte_order.c` upstream; a fetch of it 404s).
+- `native/coinxt.c` exposes `cnx_abi_version`, `cnx_keccak256`, `cnx_sha3_256`, and the length functions.
+  It builds via `native/build.sh` (a plain shared lib for ctypes/LCB, and an ASan+UBSan self-test).
+- Verified: the ASan/UBSan self-test runs clean; `cnx_keccak256` matches the published Ethereum vectors
+  (`keccak256("")` = `c5d2...a470`), `cnx_sha3_256` matches Python `hashlib` (NIST FIPS-202), and the two
+  are provably distinct (the Keccak-vs-SHA3 footgun guarded in `tools/coin-kat.py`).
+- `tools/coin-kat.py --check` builds from source and runs the vectors headless (`self-check OK`). This is
+  the CoinXT analogue of OnionXT's KAT harness; it grows with each phase.
+
+Still to do in phase 1: nothing native-side for hashes; the `.lcb` foreign module (the on-engine binding)
+is written and confirmed in a later step, since it needs a real OXT engine to load. Next up (phase 2):
+the secp256k1 curve surface (keypair, ECDSA, recoverable, recover, ECDH), with a signature that must
+verify in an independent library.

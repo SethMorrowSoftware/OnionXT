@@ -66,11 +66,17 @@ CoinXT/
 
 ## Status
 
-**Design only. Nothing built yet.** [SPEC.md](SPEC.md), [IMPLEMENTATION-PLAN.md](IMPLEMENTATION-PLAN.md),
-and [CLAUDE.md](CLAUDE.md) are the design; the code comes next, phase by phase, native seam and KAT
-harness first. Every deterministic path will be pinned to a public known-answer vector, and the "done"
-bar for a signing feature is that a CoinXT signature verifies in a mainstream external library, not just
-in CoinXT.
+**Design done; phase 1 underway.** The native seam is proven: the shim (`native/coinxt.c`) over the
+vendored trezor-crypto SHA-3 unit builds under ASan + UBSan, exposes `cnx_keccak256` / `cnx_sha3_256`
+(the Ethereum-vs-NIST footgun handled), and passes known-answer vectors headless via
+`tools/coin-kat.py` (Keccak against published vectors, SHA3 against Python `hashlib`). That retires the
+FFI/build pipeline, the family's most expensive area. Next: the secp256k1 curve surface (phase 2), then
+encodings/addresses, HD wallets, and the `.lcb` on-engine binding.
+
+[SPEC.md](SPEC.md), [IMPLEMENTATION-PLAN.md](IMPLEMENTATION-PLAN.md), and [CLAUDE.md](CLAUDE.md) are the
+design and the running as-built log. Every deterministic path is pinned to a public known-answer vector,
+and the "done" bar for a signing feature is that a CoinXT signature verifies in a mainstream external
+library, not just in CoinXT.
 
 This sub-project lives inside the OnionXT repository for now; it is an independent library (it does not
 depend on OnionXT) and may move to its own repo later.
