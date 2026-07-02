@@ -23,17 +23,18 @@ embed or ship Tor):
       |- runs a local accept loop that Tor forwards inbound onion traffic to
             |
             +--> composes SodiumXT (sx*) for the payload and for deterministic onion keys
-            +--> plugs into Riptide (rt*) as the `ox` transport (doc 06)
+            +--> exposes a pluggable transport seam any app can use (doc 06)
 ```
 
 ## Why this matters
 
-[Riptide](https://github.com/SethMorrowSoftware/RipTide) documents "no IP anonymity by default" and "incomplete metadata privacy" as
-open, unsolved items in its threat model (its rung-4 adversary). OnionXT is the direct answer:
-route Riptide's transport through Tor and swap DHT rendezvous for onion-service rendezvous, and the
-IP-layer metadata the DHT and direct peer connections leak simply stops being emitted. OnionXT is
+Most peer-to-peer and messaging transports leak IP-layer metadata by default: who talks to whom, from
+which address, and the fact and timing of contact. Even when the payload is encrypted, the network still
+sees the endpoints. OnionXT closes that gap: route the transport through Tor and swap DHT or direct-peer
+rendezvous for onion-service rendezvous, and the IP-layer metadata simply stops being emitted. It is
 useful on its own (any xTalk app that wants an anonymous socket or a serverless, self-authenticating
-inbound address), and it is the metadata-privacy upgrade path for the whole secure-comms family.
+inbound address), and it drops in as a metadata-privacy transport under any higher-layer secure-comms
+protocol (doc 06).
 
 ## What OnionXT is NOT
 
@@ -62,7 +63,7 @@ OnionXT/
     03-control-port.md      the Tor control protocol: auth, ADD_ONION, events, bootstrap
     04-onion-rendezvous.md  v3 onion == ed25519 pubkey; deterministic onions from a seed
     05-api-reference.md     the public ox* surface
-    06-riptide-integration.md   OnionXT as a Riptide transport
+    06-transport-integration.md OnionXT as a pluggable transport for a higher-layer protocol
     07-tor-lifecycle.md     assume-running vs launch-a-bundled-binary; bootstrap UX
     08-capabilities-required.md upstream gaps (ed25519 expansion + HMAC shipped in SodiumXT ABI 6; SHA3-256 deferred)
     09-open-questions.md    the honest to-do list
@@ -86,7 +87,7 @@ OnionXT/
 The library is **implemented**: `src/onionxt.livecodescript` has the full public `ox*` surface built
 out byte-for-byte against the specs (SOCKS5 dial, control-port connect + all four auth methods, onion
 services with a loopback accept loop, deterministic-from-seed addresses, base32 and the address<->key
-mapping, events and bootstrap, idempotent teardown, and the Riptide transport seam). It composes
+mapping, events and bootstrap, idempotent teardown, and the pluggable transport seam). It composes
 SodiumXT for every hash / HMAC / signature and adds no cryptography of its own.
 
 It has **not run on an OXT engine yet.** The pure-compute paths (base32, the v3 address, the ed25519

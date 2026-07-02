@@ -80,7 +80,6 @@ Phase 0, because the whole core rests on them:
 
 ## Not needed from anyone
 
-- No new BitTorrent capability (that is TorrentXT's domain, tracked in Riptide's own
-  capabilities-required doc).
+- No new BitTorrent capability (that is TorrentXT's domain, not OnionXT's).
 - No Tor-side change: OnionXT uses stock SOCKS5 and the stock control protocol against an unmodified
   tor daemon.

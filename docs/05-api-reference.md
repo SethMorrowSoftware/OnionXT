@@ -1,9 +1,10 @@
 # 05 - Public API Reference (`ox*`)
 
-The public surface OnionXT exposes to an app or to Riptide. Shapes follow the family convention:
-**commands report status through `the result`** (and yield handles through out-style conventions),
-**functions return a value**. All are livecodescript handlers in the v1 core. This is the target
-surface for the plan; it is not implemented yet.
+The public surface OnionXT exposes to an app (or to a higher-layer protocol built on top of it). Shapes
+follow the family convention: **commands report status through `the result`** (and yield handles through
+out-style conventions), **functions return a value**. All are livecodescript handlers in the v1 core.
+This surface is implemented in `src/onionxt.livecodescript`; the socket handshakes still need an
+on-engine pass against a real tor daemon (CLAUDE.md).
 
 Naming: public `oxPascalCase`. Handles are small integers or the engine's socket ids; a stale handle
 is a clean error, never a crash. Every open has a matching idempotent close.
@@ -79,7 +80,7 @@ not know the app's framing).
 
 ## What is deliberately NOT here
 
-- No encryption, framing, or session logic: OnionXT moves bytes; the app / Riptide seals them with
-  SodiumXT and owns their framing.
+- No encryption, framing, or session logic: OnionXT moves bytes; the app (or the protocol layered on
+  top of it) seals them with SodiumXT and owns their framing.
 - No blocking read/connect variants: the whole surface is callback-driven so the one interpreter
   thread never blocks on the network (CLAUDE.md async model).

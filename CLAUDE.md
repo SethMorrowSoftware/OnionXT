@@ -9,7 +9,7 @@ This file guides Claude Code (claude.ai/code) when working in the OnionXT reposi
 > (the onion-address-is-a-public-key idea) are the source of truth for WHAT OnionXT is.
 > [IMPLEMENTATION-PLAN.md](IMPLEMENTATION-PLAN.md) is the phased HOW. This file is the operational
 > as-built record and the hard-won-lesson list, in the same spirit as the `CLAUDE.md` files in our
-> sibling projects Box2Dxt, ShowControl, TorrentXT, SodiumXT, and Riptide. Most of the OXT/LCB and
+> sibling projects Box2Dxt, ShowControl, TorrentXT, and SodiumXT. Most of the OXT/LCB and
 > FFI lessons below were paid for in full while building those; they are carried here so we do not
 > pay for them twice. The socket-I/O lessons are the new ones and are called out as such.
 
@@ -35,7 +35,7 @@ OnionXT (public ox*)   src/onionxt.livecodescript
    |- control-port client  engine socket I/O, the Tor control protocol (line-based text)
    |- local accept loop    Tor forwards inbound onion connections to a loopback port we accept on
         |- composes SodiumXT (sx*) for ed25519 identity, deterministic onion keys, payload sealing
-        |- plugs into Riptide (rt*) as the `ox` transport
+        |- exposes a pluggable transport seam (oxTransport*) any higher-layer protocol can use
 ```
 
 The core is **livecodescript**, not LCB and not C, because the pieces it needs (`open socket`,
@@ -61,9 +61,10 @@ OnionXT inherits differently from each sibling. Do not cargo-cult any of them wh
    libtorrent behind a C++ shim. OnionXT wraps two simple wire protocols spoken over ordinary engine
    sockets. There is usually no FFI line to firewall. The FFI section below is carried for the day a
    helper shim is justified, and is explicitly gated on "if and only if you add a shim."
-4. **Unlike Riptide, OnionXT is a transport, not a protocol suite.** Riptide defines envelopes,
+4. **OnionXT is a transport, not a protocol suite.** A higher-layer protocol defines envelopes,
    ratchets, and channels. OnionXT just moves bytes anonymously and provides an address. It has no
-   opinion about what those bytes are; Riptide (or the app) owns the payload and its encryption.
+   opinion about what those bytes are; the app (or the protocol layered on top) owns the payload and
+   its encryption.
 
 ## The rules that make this safe and correct
 
@@ -95,7 +96,7 @@ OnionXT inherits differently from each sibling. Do not cargo-cult any of them wh
 ```sh
 python3 tools/check-livecodescript.py
 ```
-Carried verbatim from SodiumXT/TorrentXT/Riptide. It checks every `.lcb` and `.livecodescript` for
+Carried verbatim from SodiumXT/TorrentXT. It checks every `.lcb` and `.livecodescript` for
 smart/curly quotes and em/en dashes, handler / `if` / `repeat` / `unsafe` / `try` balance,
 constants-declared-before-use, the prefixed-token-shadow trap (`tExt` == `text`), and the
 `put ... into ... after` malformation. A script change is only "done" once this passes.
@@ -293,7 +294,8 @@ it. Therefore:
   password. Treat the cookie file path from `PROTOCOLINFO` as authoritative; do not guess it.
 - **Verify or pin the onion address.** Connecting to a v3 onion authenticates the far end to its
   ed25519 key; the remaining risk is connecting to the *wrong* address, so pin the contact's address
-  (or bind it to a SodiumXT signature) exactly as Riptide verifies keys at first contact.
+  (or bind it to a SodiumXT signature) exactly as any secure-messaging layer verifies keys at first
+  contact.
 - **Negative paths are the tests.** A bad address -> SOCKS REP failure surfaced; a stalled daemon ->
   timeout and clean teardown; a wrong control cookie -> auth failure, not a hang; a duplicate close ->
   no-op. Write these before the happy path.

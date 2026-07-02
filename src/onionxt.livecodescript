@@ -615,7 +615,7 @@ command oxSetStreamCallback pStream, pHandlerName
 end oxSetStreamCallback
 
 command oxWrite pStream, pData
-   -- Write app bytes (already sealed by the app / Riptide via SodiumXT) to the
+   -- Write app bytes (already sealed by the app via SodiumXT) to the
    -- tunnel. OnionXT does not encrypt (docs/02).
    if sStreams[pStream]["state"] is not "connected" then
       return "OnionXT: stream " & pStream & " is not open"
@@ -1235,15 +1235,15 @@ private function oxExpandedKeyFromSeed pSeed
 end oxExpandedKeyFromSeed
 
 -- ==========================================================================
--- Riptide transport seam (docs/06). Thin wrappers so Riptide (or any app) can
--- treat OnionXT as its `ox` transport: dial by rendezvous address, listen at a
+-- Pluggable transport seam (docs/06). Thin wrappers so any higher-layer protocol
+-- can treat OnionXT as a transport: dial by rendezvous address, listen at a
 -- seed-derived address, send/recv bytes. OnionXT stays a transport: no crypto,
--- no framing opinion; the payload is sealed by the app / Riptide via SodiumXT.
+-- no framing opinion; the payload is sealed by the app via SodiumXT.
 -- ==========================================================================
 
 function oxTransportInfo
    -- Advertise the transport and which optional SodiumXT-backed capabilities are
-   -- available, so a Riptide channel can negotiate ox vs bt and fall back visibly
+   -- available, so a caller can negotiate transports and fall back visibly
    -- rather than silently (docs/06). Returns a LiveCode array.
    local tInfo
    put "ox" into tInfo["transport"]
