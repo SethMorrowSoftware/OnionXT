@@ -1232,9 +1232,11 @@ private function oxExpandedKeyFromSeed pSeed
    -- Clamp the scalar a = h[0:32]: a[0] &= 0xF8, a[31] &= 0x7F, a[31] |= 0x40;
    -- RH = h[32:64]; expanded = a || RH (docs/04). Byte masking only.
    local tByte1, tByte32
-   put bitAnd(byteToNum(byte 1 of tHash), 248) into tByte1
-   put bitAnd(byteToNum(byte 32 of tHash), 127) into tByte32
-   put bitOr(tByte32, 64) into tByte32
+   -- bitAnd / bitOr are OPERATORS in LiveCode (x bitAnd y), not functions, so
+   -- they are written infix, not bitAnd(x, y).
+   put (byteToNum(byte 1 of tHash) bitAnd 248) into tByte1
+   put (byteToNum(byte 32 of tHash) bitAnd 127) into tByte32
+   put (tByte32 bitOr 64) into tByte32
    return numToByte(tByte1) & (byte 2 to 31 of tHash) & numToByte(tByte32) & (byte 33 to 64 of tHash)
 end oxExpandedKeyFromSeed
 
