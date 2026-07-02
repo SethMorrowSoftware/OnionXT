@@ -827,8 +827,9 @@ on onStatus pKind, pInfo
       demoSetStatus "svc:status", "published, awaiting descriptor upload ...", "warn"
       demoAppendLog "svc:log", "address: " & pInfo
    else if pKind is "serviceReady" then
-      demoSetStatus "svc:status", "reachable", "ok"
+      demoSetStatus "svc:status", "reachable - open it in Tor Browser now", "ok"
       demoAppendLog "svc:log", "descriptor uploaded; the onion is reachable"
+      demoAppendLog "svc:log", "open  http://" & (field "svc:address") & "/  in Tor Browser (keep this demo running)"
    end if
 end onStatus
 

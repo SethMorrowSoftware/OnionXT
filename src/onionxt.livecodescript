@@ -876,7 +876,13 @@ command oxCreateService pVirtualPort, pLocalPort
    end if
    local tHandle
    put oxStartService(pVirtualPort, pLocalPort) into tHandle
-   oxCtlSend "ADD_ONION NEW:ED25519-V3 Port=" & pVirtualPort & ",127.0.0.1:" & pLocalPort, "add_onion:" & tHandle
+   -- Flags=Detach keeps the service published even if the control connection
+   -- drops (a transient socketClosed/socketError, or a reconnect): without it, an
+   -- ADD_ONION service dies with its control connection while its descriptor
+   -- lingers in the DHT for ~3h, so a later visit hits "unable to find hidden
+   -- service identity key" at rendezvous. oxRemoveService / oxShutdown DEL_ONION
+   -- it explicitly; a hard crash leaves it until DEL_ONION or a tor restart.
+   oxCtlSend "ADD_ONION NEW:ED25519-V3 Flags=Detach Port=" & pVirtualPort & ",127.0.0.1:" & pLocalPort, "add_onion:" & tHandle
    return tHandle
 end oxCreateService
 
@@ -907,7 +913,9 @@ command oxCreateServiceFromSeed pSeed, pVirtualPort, pLocalPort
    put oxStripWhitespace(base64Encode(tExpanded)) into tBlob
    local tHandle
    put oxStartService(pVirtualPort, pLocalPort) into tHandle
-   oxCtlSend "ADD_ONION ED25519-V3:" & tBlob & " Port=" & pVirtualPort & ",127.0.0.1:" & pLocalPort, "add_onion:" & tHandle
+   -- Flags=Detach: keep the service alive across a control-connection drop (see
+   -- oxCreateService); DEL_ONION on teardown still removes it.
+   oxCtlSend "ADD_ONION ED25519-V3:" & tBlob & " Flags=Detach Port=" & pVirtualPort & ",127.0.0.1:" & pLocalPort, "add_onion:" & tHandle
    return tHandle
 end oxCreateServiceFromSeed
 
