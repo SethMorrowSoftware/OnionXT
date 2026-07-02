@@ -30,9 +30,9 @@
 -- onSvcPeerStream) are what actually populate the output fields.
 --
 -- STATUS: designed and statically reasoned, like the rest of OnionXT; the UI
--- object-creation calls (create field/button/graphic, group reparenting) need
--- an on-engine pass the same way the socket code does. The ox* calls themselves
--- are the real feature surface being demonstrated.
+-- object-creation calls (create field/button/graphic, set properties, show/hide
+-- by name) need an on-engine pass the same way the socket code does. The ox*
+-- calls themselves are the real feature surface being demonstrated.
 
 -- ==========================================================================
 -- Constants. Ports match docs/07 (system tor 9050/9051; Tor Browser 9150/9151).
@@ -55,6 +55,14 @@ constant kDemoTabs = "stat,dial,svc,addr,about"
 local sTab                  -- the currently visible tab key
 local sDialStream           -- the Dial tab's stream handle, or empty
 local sSvcHandle            -- the Service tab's published service handle, or empty
+local sTabControls          -- array: tab key -> comma list of that tab's control names
+
+-- NOTE on the UI: controls are created directly on the card and shown/hidden by
+-- name per tab (sTabControls); OnionXT does NOT reparent them into groups. LiveCode
+-- has no "set the owner" reparent (owner is read-only), and copy/relayer grouping
+-- is fiddly to do blind, so the demo just toggles visibility, which is simple and
+-- valid. This UI-construction path still wants an on-engine pass (the create/set
+-- object calls), but it uses no invalid reparenting.
 
 on preOpenStack
    -- Build the whole UI in script; no IDE design work required (matches the
@@ -149,12 +157,6 @@ private command demoMakeButton pName, pRect, pLabel
    set the style of button pName to "rectangle"
 end demoMakeButton
 
-private command demoOwnedBy pName, pGroupName
-   -- Reparent an already-created control into its tab's group, so the whole
-   -- tab shows/hides in one move (demoShowTab toggles the group's visibility).
-   set the owner of control pName to group pGroupName
-end demoOwnedBy
-
 -- ==========================================================================
 -- Chrome: header bar and the tab strip. Tab buttons are named "tabbtn:<key>";
 -- clicking one shows that tab and restyles the strip.
@@ -181,12 +183,16 @@ private command demoBuildChrome
 end demoBuildChrome
 
 private command demoShowTab pKey
-   local tI, tCandidate, tSaved
+   -- Show the chosen tab's controls, hide every other tab's, by name (no groups).
+   local tI, tCandidate, tSaved, tJ, tCtrl
    put the itemDelimiter into tSaved
    set the itemDelimiter to comma
    repeat with tI = 1 to the number of items of kDemoTabs
       put item tI of kDemoTabs into tCandidate
-      set the visible of group ("panel:" & tCandidate) to (tCandidate is pKey)
+      repeat with tJ = 1 to the number of items of sTabControls[tCandidate]
+         put item tJ of sTabControls[tCandidate] into tCtrl
+         set the visible of control tCtrl to (tCandidate is pKey)
+      end repeat
    end repeat
    set the itemDelimiter to tSaved
    put pKey into sTab
@@ -216,7 +222,6 @@ end demoRestyleTabs
 -- ==========================================================================
 
 private command demoBuildStatusTab
-   create group "panel:stat"
    demoMakeLabel "stat:hdr", "20,90,700,114", "Control connection and bootstrap", "text"
    demoMakeLabel "stat:socksLbl", "20,124,140,146", "SOCKS port:", "muted"
    demoMakeInput "stat:socks", "150,120,260,146", kDemoDefaultSocksPort
@@ -235,7 +240,7 @@ private command demoBuildStatusTab
 
    local tNames
    put "hdr,socksLbl,socks,ctlLbl,ctl,connect,disconnect,status,bar,version,hint" into tNames
-   demoGroupAll "stat", tNames
+   demoRegisterTab "stat", tNames
 end demoBuildStatusTab
 
 private command handleStat pRole
@@ -265,7 +270,6 @@ end handleStat
 -- ==========================================================================
 
 private command demoBuildDialTab
-   create group "panel:dial"
    demoMakeLabel "dial:hdr", "20,90,700,114", "Dial a host through Tor (SOCKS5)", "text"
    demoMakeLabel "dial:hostLbl", "20,124,80,146", "Host:", "muted"
    demoMakeInput "dial:host", "90,120,560,146", kDemoDefaultDialHost
@@ -279,7 +283,7 @@ private command demoBuildDialTab
 
    local tNames
    put "hdr,hostLbl,host,portLbl,port,go,status,msg,send,log" into tNames
-   demoGroupAll "dial", tNames
+   demoRegisterTab "dial", tNames
 end demoBuildDialTab
 
 private command handleDial pRole
@@ -345,7 +349,6 @@ end onDialStream
 -- ==========================================================================
 
 private command demoBuildServiceTab
-   create group "panel:svc"
    demoMakeLabel "svc:hdr", "20,90,700,114", "Publish an onion service", "text"
    demoMakeLabel "svc:vLbl", "20,124,100,146", "Virtual port:", "muted"
    demoMakeInput "svc:vport", "110,120,190,146", 80
@@ -360,7 +363,7 @@ private command demoBuildServiceTab
 
    local tNames
    put "hdr,vLbl,vport,lLbl,lport,publish,remove,status,addrLbl,address,log" into tNames
-   demoGroupAll "svc", tNames
+   demoRegisterTab "svc", tNames
 end demoBuildServiceTab
 
 private command handleSvc pRole
@@ -426,7 +429,6 @@ end onSvcPeerStream
 -- ==========================================================================
 
 private command demoBuildAddressTab
-   create group "panel:addr"
    demoMakeLabel "addr:hdr", "20,90,700,114", "Address tools (pure, no network)", "text"
    demoMakeLabel "addr:pasteLbl", "20,124,140,146", "Onion address:", "muted"
    demoMakeInput "addr:paste", "150,120,600,146", kDemoKnownAddress
@@ -438,7 +440,7 @@ private command demoBuildAddressTab
 
    local tNames
    put "hdr,pasteLbl,paste,decode,pubkey,encode,reencoded,validLbl" into tNames
-   demoGroupAll "addr", tNames
+   demoRegisterTab "addr", tNames
 end demoBuildAddressTab
 
 private command handleAddr pRole
@@ -486,7 +488,6 @@ end demoEncodeAddress
 -- ==========================================================================
 
 private command demoBuildAboutTab
-   create group "panel:about"
    demoMakeLabel "about:hdr", "20,90,700,114", "OnionXT " & oxVersion(), "text"
    demoMakeLabel "about:blurb", "20,120,740,190", \
       "A Tor transport and self-authenticating rendezvous layer for OXT/LiveCode." & return & \
@@ -500,7 +501,7 @@ private command demoBuildAboutTab
 
    local tNames
    put "hdr,blurb,capsLbl,caps,runTests,testlog" into tNames
-   demoGroupAll "about", tNames
+   demoRegisterTab "about", tNames
    demoShowCapabilities
 end demoBuildAboutTab
 
@@ -603,26 +604,34 @@ end mouseUp
 -- Small local helpers (demo glue only, not part of the ox* surface).
 -- ==========================================================================
 
-private command demoGroupAll pTabKey, pRoleList
-   -- Reparent every "prefix:role" control named in pRoleList into its tab's
-   -- group, then hide the group until demoShowTab selects it.
-   local tI, tRole, tSaved
+private command demoRegisterTab pTabKey, pRoleList
+   -- Record this tab's full control names ("prefix:role") in sTabControls and
+   -- hide them; demoShowTab toggles their visibility. No groups, no reparenting.
+   local tI, tRole, tSaved, tNames, tCtrl
    put the itemDelimiter into tSaved
    set the itemDelimiter to comma
+   put empty into tNames
    repeat with tI = 1 to the number of items of pRoleList
       put item tI of pRoleList into tRole
-      demoOwnedBy pTabKey & ":" & tRole, "panel:" & pTabKey
+      put pTabKey & ":" & tRole into tCtrl
+      if tNames is empty then
+         put tCtrl into tNames
+      else
+         put comma & tCtrl after tNames
+      end if
+      set the visible of control tCtrl to false
    end repeat
+   put tNames into sTabControls[pTabKey]
    set the itemDelimiter to tSaved
-   set the visible of group ("panel:" & pTabKey) to false
-end demoGroupAll
+end demoRegisterTab
 
 private function demoBytesToHex pData
    -- A local hex helper so this demo has no hidden dependency on OnionXT's
    -- private internals; binaryDecode "H*" is the same primitive the library
    -- itself uses for hex, just called from example glue instead of from inside
-   -- onionxt.livecodescript.
+   -- onionxt.livecodescript. binaryDecode is a function (returns the count and
+   -- fills the output var), so call it as one and `get` the discarded count.
    local tHex
-   binaryDecode "H*", pData, tHex
+   get binaryDecode("H*", pData, tHex)
    return tHex
 end demoBytesToHex

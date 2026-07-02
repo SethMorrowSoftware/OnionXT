@@ -222,7 +222,7 @@ function oxIsReady
    return (sBootstrap is 100) and (sControlState is "authenticated")
 end oxIsReady
 
-private command oxCtlOpened pSocketID
+command oxCtlOpened pSocketID
    -- The control TCP connection is up. Start the single persistent line reader
    -- and kick the auth dance with PROTOCOLINFO (allowed pre-auth).
    if pSocketID is not sControlSocket then
@@ -270,7 +270,7 @@ private command oxCtlDrainQueue
    oxCtlSend tCommand, tLabel
 end oxCtlDrainQueue
 
-private command oxCtlLine pSocketID, pData
+command oxCtlLine pSocketID, pData
    -- The persistent control-port line reader. Demultiplexes unsolicited 650
    -- events from command replies, reassembles multi-line replies, and honours
    -- the 250-/250+/'.'/250 space framing (docs/03).
@@ -340,28 +340,31 @@ end oxCtlRearm
 private command oxCtlReplyComplete
    -- Dispatch the just-completed reply to the continuation for the in-flight
    -- command. if/else-if, not switch (the static gate rejects `end switch`).
-   local tLabel, tOp, tArg, tSaved
+   -- tReplyOp, NOT tOp: a t-prefixed "tOp" lowercases to `top`, a reserved OXT
+   -- property, and the engine would parse it as the keyword, not this variable
+   -- (the prefixed-token-shadow trap, CLAUDE.md gotcha 2).
+   local tLabel, tReplyOp, tArg, tSaved
    put sCtlInFlight into tLabel
    put the itemDelimiter into tSaved
    set the itemDelimiter to ":"
-   put item 1 of tLabel into tOp
+   put item 1 of tLabel into tReplyOp
    put item 2 to -1 of tLabel into tArg
    set the itemDelimiter to tSaved
 
-   if tOp is "protocolinfo" then
+   if tReplyOp is "protocolinfo" then
       oxParseProtocolInfo sCtlReplyLines
       oxChooseAuthAndStart
-   else if tOp is "authchallenge" then
+   else if tReplyOp is "authchallenge" then
       oxHandleAuthChallenge sCtlReplyLines
-   else if tOp is "authenticate" then
+   else if tReplyOp is "authenticate" then
       oxHandleAuthResult sCtlReplyLines
-   else if tOp is "setevents" then
+   else if tReplyOp is "setevents" then
       -- 250 OK expected; nothing to do on success.
-   else if tOp is "getinfo-version" then
+   else if tReplyOp is "getinfo-version" then
       oxParseTorVersion sCtlReplyLines
-   else if tOp is "add_onion" then
+   else if tReplyOp is "add_onion" then
       oxHandleAddOnionReply tArg, sCtlReplyLines
-   else if tOp is "del_onion" then
+   else if tReplyOp is "del_onion" then
       -- 250 OK on success, 552 if unknown; the removal already forgot local
       -- state, so nothing further is required here.
    end if
@@ -489,7 +492,7 @@ private command oxParseTorVersion pReply
    end repeat
 end oxParseTorVersion
 
-private command oxCtlDeadline pSocketID
+command oxCtlDeadline pSocketID
    -- Handshake watchdog: if this control socket never reached authenticated,
    -- tear it down with a clean error (docs/07: a stalled bootstrap must not hang).
    if pSocketID is not sControlSocket then
@@ -639,7 +642,7 @@ function oxStreamState pStream
    return sStreams[pStream]["state"]
 end oxStreamState
 
-private command oxSocksOpened pSocketID
+command oxSocksOpened pSocketID
    -- TCP up: send the method-negotiation greeting 05 01 00 (VER=5, 1 method,
    -- method 00 = no auth) and read the 2-byte method selection (docs/02 step 1).
    local tHandle
@@ -652,7 +655,7 @@ private command oxSocksOpened pSocketID
    read from socket pSocketID for 2 with message oxSocksMethod
 end oxSocksOpened
 
-private command oxSocksMethod pSocketID, pData
+command oxSocksMethod pSocketID, pData
    local tHandle
    put sSockToStream[pSocketID] into tHandle
    if tHandle is empty then
@@ -701,7 +704,7 @@ private command oxSocksMethod pSocketID, pData
    read from socket pSocketID for 4 with message oxSocksReplyHead
 end oxSocksMethod
 
-private command oxSocksReplyHead pSocketID, pData
+command oxSocksReplyHead pSocketID, pData
    local tHandle
    put sSockToStream[pSocketID] into tHandle
    if tHandle is empty then
@@ -739,7 +742,7 @@ private command oxSocksReplyHead pSocketID, pData
    end if
 end oxSocksReplyHead
 
-private command oxSocksReplyLen pSocketID, pData
+command oxSocksReplyLen pSocketID, pData
    -- ATYP=3 domain BND.ADDR: one length byte, then that many, then 2 port bytes.
    local tHandle
    put sSockToStream[pSocketID] into tHandle
@@ -756,7 +759,7 @@ private command oxSocksReplyLen pSocketID, pData
    read from socket pSocketID for tLen with message oxSocksReplyDone
 end oxSocksReplyLen
 
-private command oxSocksReplyDone pSocketID, pData
+command oxSocksReplyDone pSocketID, pData
    -- The SOCKS reply is fully consumed and REP was 0: the socket is now a
    -- transparent tunnel. Hand it up and start the streaming inbound reader.
    local tHandle
@@ -773,7 +776,7 @@ private command oxSocksReplyDone pSocketID, pData
    read from socket pSocketID with message oxStreamData
 end oxSocksReplyDone
 
-private command oxStreamData pSocketID, pData
+command oxStreamData pSocketID, pData
    -- Inbound bytes on a live stream (dialed OR inbound-accepted; both are unified
    -- through the stream tables). Deliver the chunk and re-arm the read.
    local tHandle
@@ -790,7 +793,7 @@ private command oxStreamData pSocketID, pData
    end if
 end oxStreamData
 
-private command oxStreamDeadline pStream
+command oxStreamDeadline pStream
    -- Handshake watchdog for a dialed stream: if it never reached "connected",
    -- tear it down (docs/02: a silent stall is the worst failure).
    if sStreams[pStream]["socketID"] is empty then
@@ -989,7 +992,7 @@ function oxServiceIsReady pService
    return (sServices[pService]["ready"] is true)
 end oxServiceIsReady
 
-private command oxPeerAccepted pSocketID
+command oxPeerAccepted pSocketID
    -- Tor forwarded an inbound onion connection to our loopback listener. Enforce
    -- loopback (security-critical: reject any non-127.0.0.1 peer before reading a
    -- byte), wrap the accepted socket as an inbound stream, and hand it to the app.
@@ -1450,9 +1453,12 @@ end oxConstantTimeEqual
 private function oxTrySodium pFuncName, pArg
    -- Call a one-argument SodiumXT function; return "OXT_NO_HANDLER" if it does
    -- not exist, so callers can degrade. `dispatch function` reports absence
-   -- through `it` = "unhandled" without throwing (docs LiveCode ref).
-   local tResult
-   dispatch function pFuncName to oxCallbackTarget() with pArg
+   -- through `it` = "unhandled" without throwing, and the function's return
+   -- value lands in `the result` (docs LiveCode ref). Compute the target into a
+   -- local first (a function call is not passed inline as the dispatch target).
+   local tTarget
+   put oxCallbackTarget() into tTarget
+   dispatch function pFuncName to tTarget with pArg
    if it is "unhandled" then
       return "OXT_NO_HANDLER"
    end if
@@ -1460,7 +1466,9 @@ private function oxTrySodium pFuncName, pArg
 end oxTrySodium
 
 private function oxTrySodium2 pFuncName, pArg1, pArg2
-   dispatch function pFuncName to oxCallbackTarget() with pArg1, pArg2
+   local tTarget
+   put oxCallbackTarget() into tTarget
+   dispatch function pFuncName to tTarget with pArg1, pArg2
    if it is "unhandled" then
       return "OXT_NO_HANDLER"
    end if
@@ -1550,8 +1558,10 @@ private command oxDispatch pHandlerName, pArg1, pArg2, pArg3
    if pHandlerName is empty then
       exit oxDispatch
    end if
+   local tTarget
+   put oxCallbackTarget() into tTarget      -- a local, not a function call inline
    try
-      dispatch pHandlerName to oxCallbackTarget() with pArg1, pArg2, pArg3
+      dispatch pHandlerName to tTarget with pArg1, pArg2, pArg3
    catch tIgnore
       -- Swallow app-side callback errors; the transport must keep running.
    end try
@@ -1696,9 +1706,12 @@ private function oxQuoteEscape pStr
 end oxQuoteEscape
 
 private function oxBytesToHex pData
-   -- Lowercase hex (high nibble first). H* packs/unpacks the whole run.
+   -- Lowercase hex (high nibble first). H* unpacks the whole run. binaryDecode is
+   -- a FUNCTION (it returns the count decoded and fills the output variable, which
+   -- must already exist), so it must be called as a function; `get` discards the
+   -- count into `it` while tHex is filled.
    local tHex
-   binaryDecode "H*", pData, tHex
+   get binaryDecode("H*", pData, tHex)
    return tHex
 end oxBytesToHex
 
@@ -1742,12 +1755,16 @@ private function oxStripWhitespace pStr
 end oxStripWhitespace
 
 private function oxTrim pStr
-   local tOut
+   -- The `tOut is not empty` guard is essential: the empty string is "in" every
+   -- string, so without it an all-whitespace or empty input would loop forever
+   -- (the first/last char of empty is empty, which `is in` any charset).
+   local tOut, tWhite
    put pStr into tOut
-   repeat while the first char of tOut is in (space & tab & numToChar(10) & numToChar(13))
+   put space & tab & numToChar(10) & numToChar(13) into tWhite
+   repeat while tOut is not empty and (the first char of tOut) is in tWhite
       delete the first char of tOut
    end repeat
-   repeat while the last char of tOut is in (space & tab & numToChar(10) & numToChar(13))
+   repeat while tOut is not empty and (the last char of tOut) is in tWhite
       delete the last char of tOut
    end repeat
    return tOut
