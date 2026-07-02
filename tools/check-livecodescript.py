@@ -58,6 +58,21 @@ RESERVED = {
     "text", "the", "then", "this", "throw", "to", "token", "true", "trueword",
     "type", "unsafe", "until", "use", "value", "variable", "where", "while",
     "with", "without", "word",
+    # The shadow-trap check only inspects t/p/s/k-prefixed names, so a collision
+    # is only possible with a reserved word / built-in property / function that
+    # itself STARTS with t, p, s, or k. The set above was missing several of
+    # those (notably `top`, an object property: `tOp` lowercases to `top` and
+    # the engine parses it as the property, not a variable). Only ATOMIC short
+    # tokens belong here: a compound property like `textFont` is legitimately
+    # written in that CamelCase when you set the property, so listing it would
+    # false-positive on correct code, while nobody names a variable `textFont`.
+    # These atomic tokens are the realistic traps (a careless prefix+suffix that
+    # spells one); extend as more are found on-engine.
+    "tan", "time", "tool", "top",
+    "param", "params", "pi", "player", "point", "pow",
+    "script", "scroll", "second", "seconds", "seek", "sin", "size", "space",
+    "sqrt", "stack", "start", "stop", "style", "sum",
+    "keys",
 }
 
 LCB_HANDLER_OPENERS = ("handler",)               # .lcb: handler / public handler

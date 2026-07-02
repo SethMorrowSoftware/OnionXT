@@ -142,11 +142,17 @@ end testInitialState
 private command testFailClosedArguments
    oxSection "fail-closed argument validation"
 
+   -- oxDial / oxCreateService* are COMMANDS: invoke them as statements and read
+   -- their handle-or-error from `the result` (you cannot call a command with
+   -- function-call parentheses; that syntax needs a `function` handler). Only
+   -- oxAddressFromPublicKey below is a function, so it takes parentheses.
    local tResult
-   put oxDial(empty, 80) into tResult
+   oxDial empty, 80
+   put the result into tResult
    oxCheck (tResult begins with "OnionXT:"), "oxDial rejects an empty host"
 
-   put oxDial("example.onion", 99999) into tResult
+   oxDial "example.onion", 99999
+   put the result into tResult
    oxCheck (tResult begins with "OnionXT:"), "oxDial rejects a port outside 1..65535"
 
    -- These two prove the pre-auth fail-closed guard specifically, so they are
@@ -157,11 +163,13 @@ private command testFailClosedArguments
       put sLog & "  --   (skipped: pre-auth guard on oxCreateService* needs a " & \
          "session that has not authenticated yet)" & return into sLog
    else
-      put oxCreateService(80, 8080) into tResult
+      oxCreateService 80, 8080
+      put the result into tResult
       oxCheck (tResult begins with "OnionXT:"), \
          "oxCreateService fails closed without an authenticated control connection"
 
-      put oxCreateServiceFromSeed(testZeroSeed(), 80, 8080) into tResult
+      oxCreateServiceFromSeed testZeroSeed(), 80, 8080
+      put the result into tResult
       oxCheck (tResult begins with "OnionXT:"), \
          "oxCreateServiceFromSeed also fails closed without an authenticated control connection"
    end if
@@ -182,14 +190,18 @@ private command testUnknownHandlesAreCleanMisses
    local tUnknown, tResult
    put 999999 into tUnknown
 
+   -- oxStreamState / oxServiceAddress / oxServiceIsReady are functions (parens);
+   -- oxSetStreamCallback / oxWrite are commands (statement + `the result`).
    oxCheck (oxStreamState(tUnknown) is "unknown"), "an unknown stream handle reports state unknown"
    oxCheck (oxServiceAddress(tUnknown) is empty), "an unknown service handle has no address"
    oxCheck (not oxServiceIsReady(tUnknown)), "an unknown service handle is not ready"
 
-   put oxSetStreamCallback(tUnknown, "someHandler") into tResult
+   oxSetStreamCallback tUnknown, "someHandler"
+   put the result into tResult
    oxCheck (tResult begins with "OnionXT:"), "oxSetStreamCallback on an unknown handle fails closed"
 
-   put oxWrite(tUnknown, "x") into tResult
+   oxWrite tUnknown, "x"
+   put the result into tResult
    oxCheck (tResult begins with "OnionXT:"), "oxWrite to an unknown/unconnected stream fails closed"
 end testUnknownHandlesAreCleanMisses
 
