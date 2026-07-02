@@ -82,9 +82,12 @@ Send exactly one of these, matching the chosen method:
 - **HASHEDPASSWORD**: `AUTHENTICATE "<password>"` (the password quoted; the daemon stores only its
   hash).
 
-Expect `250 OK`. `515` means the credential was wrong; `514` means you skipped auth. Note: SAFECOOKIE
-needs HMAC-SHA256, which is a SodiumXT capability gap today (doc 08); until it lands, COOKIE auth
-(plain hex over loopback) is the pragmatic path, and NULL/HASHEDPASSWORD need no HMAC.
+Expect `250 OK`. `515` means the credential was wrong; `514` means you skipped auth. SAFECOOKIE's
+HMAC-SHA256 is now available (SodiumXT `sxHmacSha256`, ABI 6, doc 08 gap #3 SHIPPED), so OnionXT
+implements SAFECOOKIE directly: it composes `sxHmacSha256` with the two Tor key strings and checks
+`SERVERHASH` in constant time via `sxMemEqual`. COOKIE auth (plain hex over loopback) remains a fine
+fallback when SodiumXT is not loaded, and NULL/HASHEDPASSWORD need no HMAC at all. OnionXT prefers
+SAFECOOKIE > COOKIE > NULL > HASHEDPASSWORD and degrades past any method whose prerequisite is missing.
 
 ## Step 3: publish an onion service (ADD_ONION)
 

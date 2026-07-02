@@ -20,15 +20,15 @@ docs and code in the same change that closes them.
 
 ## Design decisions to settle
 
-4. **Epoch-scoped rotating onions: worth the cost?** Rotating the onion address per Riptide epoch gives
+4. **Epoch-scoped rotating onions: worth the cost?** Rotating the onion address per epoch gives
    unlinkability but forces a descriptor republish (seconds of unreachability) each rotation. Quantify
    the latency and decide default cadence, or make it a per-channel policy.
 5. **Client authorization by default?** v3 client auth (doc 04) makes an onion unreachable to anyone
-   without the x25519 key, closing address-phishing, at the cost of distributing that key. Should
-   Riptide channels use it by default, or only for high-sensitivity contacts?
+   without the x25519 key, closing address-phishing, at the cost of distributing that key. Should a
+   channel use it by default, or only for high-sensitivity contacts?
 6. **Reads: chunk delivery vs app framing.** OnionXT delivers raw inbound chunks to a stream callback
    and lets the app frame. Should OnionXT offer an optional length-prefixed framing helper (still no
-   crypto), or stay strictly byte-transparent? Leaning transparent, but confirm against Riptide's
+   crypto), or stay strictly byte-transparent? Leaning transparent, but confirm against real consumer
    envelope needs.
 7. **How much lifecycle to own (Mode B).** Launching/supervising a bundled tor is convenient but adds a
    trusted binary and distribution weight (doc 07). Decide whether the reference product bundles tor or
@@ -40,17 +40,21 @@ docs and code in the same change that closes them.
 
 ## Upstream dependencies (tracked in doc 08)
 
-9. **SodiumXT SHA-512 / ed25519 expansion** for deterministic onions. Blocks `oxCreateServiceFromSeed`
-   until landed; deferral (Tor-generated keys) unblocks the rest.
-10. **SodiumXT SHA3-256** for offline address checksum, and **HMAC-SHA256** for SAFECOOKIE auth. Both
-    deferrable for v1; add when hardening.
+9. **SodiumXT ed25519 expansion** for deterministic onions - **SHIPPED** (SodiumXT ABI 6,
+   `sxSignSeedToExpandedKey`). `oxCreateServiceFromSeed` composes it; `oxCreateService` (Tor-generated
+   key) needs no SodiumXT. RESOLVED.
+10. **SodiumXT HMAC-SHA256** for SAFECOOKIE auth - **SHIPPED** (SodiumXT ABI 6, `sxHmacSha256`);
+    OnionXT implements SAFECOOKIE directly, with COOKIE/NULL/HASHEDPASSWORD as fallbacks. RESOLVED.
+    **SodiumXT SHA3-256** for the offline address checksum stays **DEFERRED** (libsodium has no SHA-3;
+    a nicety, not a security dependency - tor authenticates the onion at connect time). This is the
+    only remaining upstream gap.
 
 ## Testing and conformance
 
-11. **What is the conformance vector here?** SodiumXT and Riptide have crypto/wire KATs. OnionXT's
-    determinism claim (seed -> `.onion`) has a known answer worth pinning as a vector once the
-    expansion helper exists; the SOCKS/control wire behaviour can only be integration-tested against a
-    real daemon. Decide the split between a pinned derivation vector and an on-engine interop harness.
+11. **What is the conformance vector here?** SodiumXT has crypto KATs. OnionXT's determinism claim
+    (seed -> `.onion`) has a known answer pinned as a vector now that the expansion helper has shipped
+    (`tools/onion-kat.py`); the SOCKS/control wire behaviour can only be integration-tested against a
+    real daemon. The split is a pinned derivation vector plus an on-engine interop harness.
 12. **Negative-path coverage.** Bad address, stalled daemon, wrong cookie, double close, peer vanishing
     mid-handshake, descriptor never publishing. These are the security-relevant tests; enumerate and
     script them (Phase 6) before declaring robustness.

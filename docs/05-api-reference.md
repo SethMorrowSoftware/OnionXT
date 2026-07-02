@@ -1,9 +1,10 @@
 # 05 - Public API Reference (`ox*`)
 
-The public surface OnionXT exposes to an app or to Riptide. Shapes follow the family convention:
-**commands report status through `the result`** (and yield handles through out-style conventions),
-**functions return a value**. All are livecodescript handlers in the v1 core. This is the target
-surface for the plan; it is not implemented yet.
+The public surface OnionXT exposes to an app (or to a higher-layer protocol built on top of it). Shapes
+follow the family convention: **commands report status through `the result`** (and yield handles through
+out-style conventions), **functions return a value**. All are livecodescript handlers in the v1 core.
+This surface is implemented in `src/onionxt.livecodescript`; the socket handshakes still need an
+on-engine pass against a real tor daemon (CLAUDE.md).
 
 Naming: public `oxPascalCase`. Handles are small integers or the engine's socket ids; a stale handle
 is a clean error, never a crash. Every open has a matching idempotent close.
@@ -48,7 +49,7 @@ not know the app's framing).
 | Handler | Kind | Purpose |
 |---|---|---|
 | `oxCreateService pVirtualPort, pLocalPort` | command | `ADD_ONION NEW:ED25519-V3` mapping `pVirtualPort` -> `127.0.0.1:pLocalPort`, after ensuring a loopback listener is accepting on `pLocalPort`. Reports the full `<56>.onion` address and a service handle. |
-| `oxCreateServiceFromSeed pSeed, pVirtualPort, pLocalPort` | command | As above, but deterministic: derive the ed25519 key from `pSeed` via SodiumXT and pass the expanded key (needs the doc 08 helper), so the address is reproducible. |
+| `oxCreateServiceFromSeed pSeed, pVirtualPort, pLocalPort` | command | As above, but deterministic: composes SodiumXT `sxSignSeedToExpandedKey` (ABI >= 6) to turn the 32-byte `pSeed` into the ED25519-V3 expanded key, so the same seed always yields the same `.onion`. |
 | `oxRemoveService pService` | command | `DEL_ONION` and stop the listener. Idempotent. |
 | `oxServiceAddress pService` | function | The `.onion` address of a published service. |
 | `oxSetPeerCallback pHandlerName` | command | Register the handler called when a peer connects to a published service (delivers a new inbound stream handle). |
@@ -57,7 +58,7 @@ not know the app's framing).
 
 | Handler | Kind | Purpose |
 |---|---|---|
-| `oxAddressFromPublicKey pEd25519Pub` | function | Encode a 32-byte ed25519 public key as a `<56>.onion` address (checksum needs SHA3-256, doc 08). |
+| `oxAddressFromPublicKey pEd25519Pub` | function | Encode a 32-byte ed25519 public key as a `<56>.onion` address (checksum needs SHA3-256, doc 08 gap #2, still deferred; returns a capability error until it lands). |
 | `oxPublicKeyFromAddress pOnionAddress` | function | Decode a `.onion` back to its 32-byte ed25519 public key. base32-decode + strip checksum/version. |
 | `oxIsValidAddress pOnionAddress` | function | Structural + (when SHA3-256 is available) checksum validation of a pasted address. |
 
@@ -79,7 +80,7 @@ not know the app's framing).
 
 ## What is deliberately NOT here
 
-- No encryption, framing, or session logic: OnionXT moves bytes; the app / Riptide seals them with
-  SodiumXT and owns their framing.
+- No encryption, framing, or session logic: OnionXT moves bytes; the app (or the protocol layered on
+  top of it) seals them with SodiumXT and owns their framing.
 - No blocking read/connect variants: the whole surface is callback-driven so the one interpreter
   thread never blocks on the network (CLAUDE.md async model).

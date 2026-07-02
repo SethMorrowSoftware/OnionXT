@@ -23,14 +23,15 @@ self-authenticating rendezvous for free because a v3 onion address is an ed25519
    and a rendezvous point at once, with no CA, no DNS, and no MITM-able key exchange. See
    [04-onion-rendezvous.md](04-onion-rendezvous.md).
 
-## Where OnionXT sits in the family
+## Where OnionXT sits
 
 ```
 SodiumXT (sx*)   crypto: ed25519 identity, key derivation, AEAD, secretstream, sealing
-TorrentXT (bt*)  the BitTorrent DHT / swarm transport (Riptide's default transport)
+TorrentXT (bt*)  the BitTorrent DHT / swarm transport
 OnionXT  (ox*)   the Tor transport + onion rendezvous (this repo)
       |
-Riptide (rt*)    composes the above into secure channels; picks a transport per channel
+your app         composes the pieces it needs; OnionXT supplies anonymous dial + onion rendezvous,
+                 and a higher-layer protocol can plug into its transport seam (doc 06)
 ```
 
 OnionXT is a **transport and naming layer**. It adds no cryptography (SodiumXT does that) and no
@@ -43,7 +44,7 @@ form it ships **no native code at all**.
 ```
    +-------------------- one OXT app instance --------------------+
    |                                                              |
-   |  app / Riptide            OnionXT (ox*)                      |
+   |  your app                 OnionXT (ox*)                      |
    |     |  oxDial ----------->  SOCKS5 state machine  --------------> 127.0.0.1:9050 (tor SOCKS)
    |     |  oxCreateService -->  control state machine  -------------> 127.0.0.1:9051 (tor control)
    |     |  onPeer  <---------   accept loop           <-------------- 127.0.0.1:<local> (tor forwards
@@ -76,6 +77,7 @@ See [08-capabilities-required.md](08-capabilities-required.md).
 4. [04-onion-rendezvous.md](04-onion-rendezvous.md) - the onion-address-is-a-public-key idea and
    deterministic onions.
 5. [05-api-reference.md](05-api-reference.md) - the public `ox*` surface.
-6. [06-riptide-integration.md](06-riptide-integration.md) - OnionXT as a Riptide transport.
+6. [06-transport-integration.md](06-transport-integration.md) - OnionXT as a pluggable transport for a
+   higher-layer protocol.
 7. [07-tor-lifecycle.md](07-tor-lifecycle.md), [08-capabilities-required.md](08-capabilities-required.md),
    [09-open-questions.md](09-open-questions.md) - the edges.

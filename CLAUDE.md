@@ -9,7 +9,7 @@ This file guides Claude Code (claude.ai/code) when working in the OnionXT reposi
 > (the onion-address-is-a-public-key idea) are the source of truth for WHAT OnionXT is.
 > [IMPLEMENTATION-PLAN.md](IMPLEMENTATION-PLAN.md) is the phased HOW. This file is the operational
 > as-built record and the hard-won-lesson list, in the same spirit as the `CLAUDE.md` files in our
-> sibling projects Box2Dxt, ShowControl, TorrentXT, SodiumXT, and Riptide. Most of the OXT/LCB and
+> sibling projects Box2Dxt, ShowControl, TorrentXT, and SodiumXT. Most of the OXT/LCB and
 > FFI lessons below were paid for in full while building those; they are carried here so we do not
 > pay for them twice. The socket-I/O lessons are the new ones and are called out as such.
 
@@ -35,7 +35,7 @@ OnionXT (public ox*)   src/onionxt.livecodescript
    |- control-port client  engine socket I/O, the Tor control protocol (line-based text)
    |- local accept loop    Tor forwards inbound onion connections to a loopback port we accept on
         |- composes SodiumXT (sx*) for ed25519 identity, deterministic onion keys, payload sealing
-        |- plugs into Riptide (rt*) as the `ox` transport
+        |- exposes a pluggable transport seam (oxTransport*) any higher-layer protocol can use
 ```
 
 The core is **livecodescript**, not LCB and not C, because the pieces it needs (`open socket`,
@@ -61,16 +61,18 @@ OnionXT inherits differently from each sibling. Do not cargo-cult any of them wh
    libtorrent behind a C++ shim. OnionXT wraps two simple wire protocols spoken over ordinary engine
    sockets. There is usually no FFI line to firewall. The FFI section below is carried for the day a
    helper shim is justified, and is explicitly gated on "if and only if you add a shim."
-4. **Unlike Riptide, OnionXT is a transport, not a protocol suite.** Riptide defines envelopes,
+4. **OnionXT is a transport, not a protocol suite.** A higher-layer protocol defines envelopes,
    ratchets, and channels. OnionXT just moves bytes anonymously and provides an address. It has no
-   opinion about what those bytes are; Riptide (or the app) owns the payload and its encryption.
+   opinion about what those bytes are; the app (or the protocol layered on top) owns the payload and
+   its encryption.
 
 ## The rules that make this safe and correct
 
-1. **Add no cryptography. Compose SodiumXT.** ed25519 identity keys, deterministic onion keys from a
-   seed, and every protected payload byte are SodiumXT calls (`sx*`). There is no OnionXT cipher, KDF,
-   or signature. A missing primitive (SHA-512 for ed25519 key expansion, SHA3-256 for the v3 address
-   checksum) is an upstream SodiumXT feature request (doc 08), never a hand-rolled hash here.
+1. **Add no cryptography. Compose SodiumXT (ABI >= 6).** ed25519 identity keys, the deterministic
+   onion-key expansion (`sxSignSeedToExpandedKey`), SAFECOOKIE HMAC (`sxHmacSha256`), and every
+   protected payload byte are SodiumXT calls (`sx*`). There is no OnionXT cipher, KDF, or signature. A
+   still-missing primitive (SHA3-256 for the offline v3 address checksum, doc 08 gap #2, deferred) is an
+   upstream SodiumXT feature request, never a hand-rolled hash here.
 2. **Trust the onion address, verify the daemon, distrust the network.** A v3 onion address is an
    ed25519 public key (doc 04): connecting to it authenticates the far end for free, so treat the
    address as the contact's identity and pin it. The **local tor daemon is trusted** (it sees your
@@ -94,7 +96,7 @@ OnionXT inherits differently from each sibling. Do not cargo-cult any of them wh
 ```sh
 python3 tools/check-livecodescript.py
 ```
-Carried verbatim from SodiumXT/TorrentXT/Riptide. It checks every `.lcb` and `.livecodescript` for
+Carried verbatim from SodiumXT/TorrentXT. It checks every `.lcb` and `.livecodescript` for
 smart/curly quotes and em/en dashes, handler / `if` / `repeat` / `unsafe` / `try` balance,
 constants-declared-before-use, the prefixed-token-shadow trap (`tExt` == `text`), and the
 `put ... into ... after` malformation. A script change is only "done" once this passes.
@@ -292,7 +294,8 @@ it. Therefore:
   password. Treat the cookie file path from `PROTOCOLINFO` as authoritative; do not guess it.
 - **Verify or pin the onion address.** Connecting to a v3 onion authenticates the far end to its
   ed25519 key; the remaining risk is connecting to the *wrong* address, so pin the contact's address
-  (or bind it to a SodiumXT signature) exactly as Riptide verifies keys at first contact.
+  (or bind it to a SodiumXT signature) exactly as any secure-messaging layer verifies keys at first
+  contact.
 - **Negative paths are the tests.** A bad address -> SOCKS REP failure surfaced; a stalled daemon ->
   timeout and clean teardown; a wrong control cookie -> auth failure, not a hang; a duplicate close ->
   no-op. Write these before the happy path.
@@ -318,14 +321,19 @@ Design decisions worth knowing before you touch the code:
   continuation (run when a reply completes) enqueues the next command while the old label is still in
   flight, and `oxCtlLine` then clears the label and drains the queue. `650` event lines are demuxed from
   command replies by their leading status code. `itemDelimiter` is saved and restored around every use.
-- **Crypto is composed, never hand-rolled.** Every `sx*` call goes through `oxTrySodium` /
-  `oxTrySodium2`, which use `dispatch function ... to <callback owner>` and read `it = "unhandled"` to
-  detect an absent primitive, degrading to a clear `"needs SodiumXT sxXxx (docs/08)"` error (or a safe
-  fallback, e.g. SAFECOOKIE -> COOKIE). base32 and the ed25519 scalar clamp are pure byte ops and are
-  the only "math" done in script.
-- **base32 keeps its bit-buffer small.** The accumulator is masked to its pending bits each step so a
-  35-byte address never builds a 280-bit integer (which would lose precision past 2^53). The KAT in
-  `tools/onion-kat.py` pins the answers.
+- **Crypto is composed, never hand-rolled. OnionXT requires SodiumXT ABI >= 6** for the
+  deterministic-onion and SAFECOOKIE paths (the SOCKS dial path, Tor-generated onions, and
+  COOKIE/NULL/HASHEDPASSWORD auth need no SodiumXT). Each `sx*` primitive is called DIRECTLY and wrapped
+  in `try/catch`: an absent handler raises a catchable execution error, so a missing primitive degrades
+  to a clear `"needs SodiumXT sxXxx"` error (or a safe fallback, e.g. SAFECOOKIE -> COOKIE) and the
+  return value comes back unambiguously (this replaced an earlier `dispatch function` approach whose
+  `it`/`the result` semantics were murky). ABI 6 SHIPPED gaps #1 (`sxSignSeedToExpandedKey`) and #3
+  (`sxHmacSha256`); only gap #2 (SHA3-256, offline checksum) stays deferred. base32 and the base64
+  encode are pure byte ops; the ed25519 scalar clamp now lives inside SodiumXT's expansion helper.
+- **base32 keeps its bit-buffer small, and uses no `^`/`div`/`mod`.** The accumulator is masked to its
+  pending bits each step so a 35-byte address never builds a 280-bit integer (precision loss past 2^53).
+  It routes integer division/modulo through `oxIntDiv`/`oxIntMod` and powers through `oxPow2` (some OXT
+  parsers reject `^` in a compound expression). The KAT in `tools/onion-kat.py` pins the answers.
 
 The on-engine `VERIFY:` checklist (settle each against a real engine + tor daemon):
 

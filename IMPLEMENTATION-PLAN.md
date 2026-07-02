@@ -27,8 +27,8 @@ livecodescript:
   `tools/onion-kat.py`.
 - **Phase 6 (events, bootstrap, negatives):** implemented - `SETEVENTS`, coalesced status,
   central `socketError`/`socketClosed`/`socketTimeout` teardown, idempotent `oxShutdown`.
-- **Phase 7 (Riptide transport):** the `oxTransport*` seam is implemented; the live Riptide channel is
-  an integration milestone in the Riptide repo.
+- **Phase 7 (transport seam):** the `oxTransport*` seam is implemented; wiring it into a live
+  higher-layer channel is an integration milestone in that consumer's repo, not here.
 - **Phase 8 (lifecycle/native):** optional `oxLaunchTor` / `oxStopTor` are implemented and flagged;
   no native shim is needed (v1 is pure script).
 
@@ -154,19 +154,21 @@ returns a clean error instead of hanging or crashing.
 
 **Risk retired:** the "works in the demo, hangs in the field" failure mode.
 
-## Phase 7 - Riptide transport integration
+## Phase 7 - Transport seam
 
-**Goal:** OnionXT becomes Riptide's `ox` transport (doc 06).
+**Goal:** OnionXT exposes a clean, pluggable transport seam a higher-layer protocol can build on (doc 06).
 
-- Implement the transport interface Riptide expects (dial by rendezvous address, listen, send/recv an
-  envelope), mapping Riptide's rendezvous to an onion address derived from the shared/identity key.
-- Advertise `ox` transport support in the Riptide prekey bundle; let a channel negotiate `ox` vs `bt`.
-- Feed the self-authenticating onion address into Riptide's first-contact verification (doc 06).
+- Implement a generic transport interface (dial by rendezvous address, listen, send/recv bytes), mapping
+  a rendezvous identity to an onion address derived from the shared/identity key (`oxTransport*`).
+- Advertise available capabilities (`oxTransportInfo`) so a caller can negotiate transports and fall
+  back visibly rather than silently.
+- Make the self-authenticating onion address available to a consumer's first-contact verification (doc 06).
 
-**Done when:** a Riptide channel completes a message exchange entirely over OnionXT, and the threat
-model doc can move "no IP anonymity" from "unsolved" to "available via the ox transport."
+**Done when:** the `oxTransport*` seam is implemented and documented so any consumer can complete a
+message exchange over OnionXT; the threat-model doc can then move "no IP anonymity" from "unsolved" to
+"available via the onion transport."
 
-**Risk retired:** the integration that motivates the whole project.
+**Risk retired:** an integration seam that is coupled to one specific consumer.
 
 ## Phase 8 - Optional: tor lifecycle and native helpers
 

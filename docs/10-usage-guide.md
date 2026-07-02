@@ -1,7 +1,7 @@
 # 10 - Usage Guide (for any OXT / LiveCode app)
 
 OnionXT is useful to any OpenXTalk / LiveCode app that wants an anonymous socket or a serverless,
-self-authenticating inbound address, not only to Riptide. This is the from-zero guide: how to load the
+self-authenticating inbound address. This is the from-zero guide: how to load the
 library, point it at a tor daemon, dial out, publish an onion service, handle the callbacks, compose
 SodiumXT for the parts OnionXT deliberately does not do, and read the honesty caveats.
 
@@ -13,9 +13,10 @@ SodiumXT for the parts OnionXT deliberately does not do, and read the honesty ca
 
 OnionXT talks to a locally-running tor; it does not embed or ship one. Any of these works:
 
-- **Tor Browser** - SOCKS on `127.0.0.1:9150`, control on `127.0.0.1:9151`. You may need to enable the
-  control port and cookie auth in its config.
-- **System tor** (a package on Linux/macOS, or a service) with this bring-up `torrc`:
+- **Tor Browser** - SOCKS on `127.0.0.1:9150`. Note it does **not** expose a control port by default, so
+  the Service/onion features are unavailable until you enable one (control `9151`).
+- **System tor** (a package on Linux/macOS, a Windows service, or the Tor Expert Bundle `tor.exe`) with
+  the bring-up `torrc` below.
 
 ```
 SocksPort 9050
@@ -23,8 +24,39 @@ ControlPort 9051
 CookieAuthentication 1
 ```
 
-Dialing out needs only the SOCKS port. Publishing an onion service, and reading bootstrap/events, needs
-the control port and an auth method (cookie auth above, or `HashedControlPassword`).
+**The key distinction:** tor opens the **SOCKS** port by default, but it does **not** open a **control**
+port unless you ask for one. So dialing out (section 3) works against a stock tor with zero config, while
+publishing an onion service and reading bootstrap/events (section 4) need the control port enabled first.
+A refused control connection surfaces as a clear error (on Windows, `Error 10061`, `WSAECONNREFUSED`);
+it means nothing is listening on that port, i.e. the control port is not enabled or you have the wrong
+port number.
+
+### Enabling the control port
+
+Pick whichever fits how you run tor:
+
+- **Command-line flags (no file to edit).** tor accepts any `torrc` option as a flag, so add:
+  ```
+  tor --ControlPort 9051 --CookieAuthentication 1
+  ```
+  (append these to your launch shortcut/script/command), then restart tor.
+- **A `torrc` file (persistent).** Put the three lines above in a plain-text file named exactly `torrc`
+  (no extension; in Notepad, save with *Save as type: All Files* and the name in quotes), then launch
+  `tor -f /path/to/torrc`. Typical default locations: Linux `/etc/tor/torrc`; macOS Homebrew
+  `/opt/homebrew/etc/tor/torrc` (Intel `/usr/local/etc/tor/torrc`); Windows `%APPDATA%\tor\torrc` or
+  next to `tor.exe`.
+
+**Verify it took.** After restarting, tor's log gains a second listener line next to the SOCKS one:
+
+```
+[notice] Opening Socks listener on 127.0.0.1:9050
+[notice] Opening Control listener on 127.0.0.1:9051      <- this line is the proof
+```
+
+Prefer **cookie auth** (`CookieAuthentication 1`) over `HashedControlPassword` for local use: tor writes a
+`control_auth_cookie` file in its `DataDirectory`, and OnionXT finds it automatically (it asks tor
+`PROTOCOLINFO` for the path and does SAFECOOKIE auth, so you never hand a password to the app). Keep the
+control port on `127.0.0.1` only; never bind it to a routable address.
 
 ## 2. Load the library
 
@@ -36,8 +68,8 @@ start using stack "onionxt"          -- if you wrap the script in a stack
 ```
 
 If you also want deterministic onion addresses, SAFECOOKIE control auth, or offline address validation,
-load **SodiumXT** the same way: OnionXT composes its `sx*` primitives and degrades to a clear error when
-one is missing (see section 7). Tell OnionXT which object your callbacks live in:
+load **SodiumXT** the same way (**ABI >= 6** for the deterministic-onion and SAFECOOKIE paths): OnionXT
+composes its `sx*` primitives and degrades to a clear error when one is missing (see section 7). Tell OnionXT which object your callbacks live in:
 
 ```
 oxSetCallbackOwner the long id of me
@@ -168,9 +200,9 @@ primitive is missing (see docs/08); check availability with:
 
 ```
 put oxTransportInfo() into tInfo            -- an array of capability flags
--- tInfo["safeCookieAuth"]     needs sxHmacSha256 + sxRandomBytes
--- tInfo["deterministicOnion"] needs sxSignSeedToExpandedKey or sxSha512
--- tInfo["offlineAddress"]     needs sxSha3_256
+-- tInfo["safeCookieAuth"]     needs sxHmacSha256 + sxRandomBytes  (SodiumXT ABI >= 6)
+-- tInfo["deterministicOnion"] needs sxSignSeedToExpandedKey       (SodiumXT ABI >= 6)
+-- tInfo["offlineAddress"]     needs sxSha3_256                    (deferred; libsodium has no SHA-3)
 ```
 
 When a primitive is absent, OnionXT falls back where it safely can (SAFECOOKIE -> COOKIE control auth,
@@ -186,7 +218,7 @@ hand-rolling a hash.
 - **The address authenticates the key, not the person.** Reaching `<56>.onion` proves you reached the
   holder of that ed25519 key, but if you were tricked into using the wrong address, Tor faithfully
   connects you to the attacker. Pin or verify the address (bind it into a SodiumXT signature at first
-  contact) exactly as Riptide does.
+  contact) exactly as any secure-messaging layer verifies keys at first contact.
 - **Seal your payload.** OnionXT moves bytes; confidentiality, integrity, and replay protection are
   SodiumXT's job and must be done.
 - **Bootstrapping is slow and visible.** A cold tor takes tens of seconds; an onion service takes

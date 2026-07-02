@@ -8,9 +8,10 @@ become a hidden dependency.
 
 The app assumes tor is already reachable on the loopback SOCKS and control ports. This is true when:
 
-- The user runs **Tor Browser** (SOCKS `9150`, control `9151`; control port and cookie auth may need
-  enabling in its config).
-- The user runs a **system tor** (Linux/macOS package, `SocksPort 9050`, `ControlPort 9051`).
+- The user runs **Tor Browser** (SOCKS `9150`). Note it does **not** open a control port by default, so
+  the onion-service features are unavailable until one is enabled (control `9151`).
+- The user runs a **system tor** (Linux/macOS package, a Windows service, or the Tor Expert Bundle
+  `tor.exe`) configured with the bring-up `torrc` below.
 - An ops team runs a managed tor alongside the app.
 
 This is the default because it is the simplest, the most testable, and it keeps OnionXT free of any
@@ -21,6 +22,13 @@ SocksPort 9050
 ControlPort 9051
 CookieAuthentication 1
 ```
+
+**tor opens the SOCKS port by default but NOT a control port** unless asked, so dialing out works against
+a stock daemon while the onion-service features need the control port enabled first. You can set it in a
+`torrc` (above) or as a command-line flag (`tor --ControlPort 9051 --CookieAuthentication 1`); either
+way, restart tor and confirm the log gains an `Opening Control listener on 127.0.0.1:9051` line next to
+the SOCKS one. A refused control connection (on Windows, `Error 10061`) means nothing is listening there.
+The full step-by-step is in [10-usage-guide.md](10-usage-guide.md#1-start-a-tor-daemon).
 
 The app should detect the daemon (`oxConnectControl` + a `GETINFO version`) and, if it is absent,
 present a clear "start Tor / install Tor" message rather than failing obscurely.

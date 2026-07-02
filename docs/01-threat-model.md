@@ -1,13 +1,13 @@
 # 01 - Threat Model
 
-OnionXT exists to close the metadata gap the family's other transports leave open. This document is
-the honest account of what routing through Tor with onion-service rendezvous actually buys, what it
-does not, and the rules that keep the docs and the UI from overpromising.
+OnionXT exists to close the metadata gap that direct, non-anonymized transports leave open. This
+document is the honest account of what routing through Tor with onion-service rendezvous actually buys,
+what it does not, and the rules that keep the docs and the UI from overpromising.
 
 ## What OnionXT is for
 
-Riptide's own threat model lists, as **unsolved** open items, "no IP anonymity by default" and
-"incomplete metadata privacy" (its rung-4 adversary: one who watches the network layer and correlates
+Many peer-to-peer and secure-messaging designs leave "no IP anonymity by default" and "incomplete
+metadata privacy" as **unsolved** open items (the adversary who watches the network layer and correlates
 who talks to whom). OnionXT is the direct answer to that adversary at the IP layer:
 
 - **IP anonymity.** With SOCKS5 dialing, the far end never learns the initiator's IP. With an onion
@@ -19,7 +19,7 @@ who talks to whom). OnionXT is the direct answer to that adversary at the IP lay
 - **Self-authenticating naming.** The onion address is the contact's ed25519 public key, so first
   contact does not require a separate, MITM-able key-distribution channel.
 
-## The adversary ladder (aligned with Riptide's)
+## The adversary ladder
 
 - **Rung 1 (a co-subscriber / passive peer):** sees only onion-routed ciphertext. Learns nothing.
 - **Rung 2 (the app's ISP / local network):** sees that the app talks to the Tor network (a known set
@@ -37,7 +37,7 @@ who talks to whom). OnionXT is the direct answer to that adversary at the IP lay
 Ship these labeled for exactly what they are; do not let the UI imply otherwise.
 
 1. **Traffic-correlation / global passive adversary.** Out of scope, as for Tor itself. Padding and
-   cover traffic (see Riptide's playbook and `sxPad`) raise the cost but do not close it.
+   cover traffic (for example a fixed-cadence heartbeat and `sxPad`) raise the cost but do not close it.
 2. **A compromised local tor daemon.** OnionXT trusts the daemon on loopback. That daemon sees your
    SOCKS targets, and if it generates your onion key it sees that key. A malicious or subverted local
    Tor is game over. Mitigate by deriving onion keys yourself from a SodiumXT seed and passing them in
@@ -47,7 +47,7 @@ Ship these labeled for exactly what they are; do not let the UI imply otherwise.
 4. **Connecting to the wrong onion.** The address authenticates the key, not the person. If an attacker
    convinces you to use *their* `.onion`, Tor faithfully connects you to the attacker. Address
    verification / pinning (or binding the address into a SodiumXT signature at first contact) is the
-   app's responsibility, exactly as Riptide verifies keys at first contact.
+   app's responsibility, exactly as any secure-messaging layer verifies keys at first contact.
 5. **Descriptor and timing metadata.** Publishing an onion descriptor reveals timing to the hash-ring
    directories; connection timing reveals when you are online. Onion services reduce, but do not
    eliminate, "when is this identity active" metadata.
