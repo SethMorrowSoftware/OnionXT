@@ -3,74 +3,77 @@
 -- Formatted like the sibling family's example stacks (SodiumXT's sodium-demo /
 -- sodium-tests split, TorrentXT's examples/): a single stack, built entirely in
 -- script on preOpenStack (no IDE design work needed), with a header bar, a tab
--- strip, and one content panel per feature. Controls use a "prefix:role" naming
--- scheme (the prefix is the owning tab, the role is the control's job), so a
--- single mouseUp router dispatches every click by parsing the target's name.
+-- strip, a persistent status bar, and one content panel per feature. Controls use
+-- a "prefix:role" naming scheme (the prefix is the owning tab, the role is the
+-- control's job), so a single mouseUp router dispatches every click by parsing
+-- the target's name, and each tab shows/hides its controls by name (no groups -
+-- LiveCode has no "set the owner" reparent).
 --
--- Create a new mainstack, set its script to this file's content (this whole
--- file IS a stack script; it needs at least the one default card every new
--- stack already has), and load onionxt.livecodescript into the message path
--- first (start using it as a library, or start it before opening this stack).
--- Load sodiumxt too for the seed-derived service and the full self-test, and
--- start using onionxt-tests.livecodescript alongside this one for the About
--- tab's "Run self-test" button (dispatch with no explicit target only reaches
--- a library that is started using, not merely a stack that happens to be
--- open). Everything here goes through the public ox* surface
--- documented in docs/05-api-reference.md and docs/10-usage-guide.md; nothing
+-- HOW TO RUN: make a new mainstack, set its stack script to this file, and put
+-- onionxt.livecodescript in the message path first (start using it as a library).
+-- Load sodiumxt too for the seed-derived service and SAFECOOKIE (SodiumXT ABI >=
+-- 6), and start using onionxt-tests.livecodescript for the About tab's self-test.
+-- Everything here goes through the public ox* surface (docs/05, docs/10); nothing
 -- reaches into OnionXT's private internals.
 --
--- WHY this differs from SodiumXT's demo (read this before you assume the same
--- shape): SodiumXT is synchronous, pure compute, no I/O - a button click calls
--- an sx* function and the result is ready on the next line. OnionXT is exactly
--- the opposite (CLAUDE.md: "OnionXT owns long-lived network state... is
--- asynchronous and event-driven"): a button click here KICKS OFF a dial or a
--- publish, and the result arrives later through a callback. So every tab that
--- touches the network follows a start-then-wait-for-callback shape instead of a
--- read-input/call/show-output shape; the callbacks (onStatus, onDialStream,
--- onSvcPeerStream) are what actually populate the output fields.
+-- WHY the flow differs from SodiumXT's demo: SodiumXT is synchronous pure compute
+-- (a click calls sx* and the result is ready on the next line). OnionXT owns
+-- long-lived network state and is asynchronous (CLAUDE.md), so a click KICKS OFF a
+-- dial / publish / connect and the outcome arrives later through a callback. The
+-- callbacks (onStatus, onDialStream, onPeer, onSvcPeerStream) drive the UI: they
+-- update the status bar, enable/disable buttons, and append to the logs. Buttons
+-- are enabled only when their action is currently valid, so the flow guides you.
 --
 -- STATUS: designed and statically reasoned, like the rest of OnionXT; the UI
 -- object-creation calls (create field/button/graphic, set properties, show/hide
--- by name) need an on-engine pass the same way the socket code does. The ox*
--- calls themselves are the real feature surface being demonstrated.
+-- by name, enable/scroll) need an on-engine pass the same way the socket code
+-- does. The ox* calls are the real feature surface being demonstrated.
 
 -- ==========================================================================
--- Constants. Ports match docs/07 (system tor 9050/9051; Tor Browser 9150/9151).
--- A stable, well-known v3 onion for the Dial tab default (docs/02 test target).
+-- Constants: window geometry, ports (docs/07: system tor 9050/9051, Tor Browser
+-- 9150/9151), and defaults for the Dial / Address tabs.
 -- ==========================================================================
 
+constant kWinWidth = 820
+constant kWinHeight = 560
+constant kMargin = 24
+constant kContentRight = 796      -- kWinWidth - kMargin
 constant kDemoDefaultSocksPort = 9050
 constant kDemoDefaultControlPort = 9051
 constant kDemoDefaultDialHost = "duckduckgogg42xjoc72x3sjasowoarfbgcmvfimaftt6twagswzczad.onion"
 constant kDemoDefaultDialPort = 80
 constant kDemoKnownAddress = "2gzyxa5ihm7nsggfxnu52rck2vv4rvmdlkiu3zzui5du4xyclen53wid.onion"
+-- A SINGLE font name: LiveCode's textFont reads a comma as "fontname,language"
+-- (a Unicode language tag), NOT a CSS-style fallback list, so a list would be
+-- misparsed. "Courier" is the one monospace name that resolves on every platform.
+constant kMono = "Courier"
 constant kDemoTabs = "stat,dial,svc,addr,about"
 
 -- ==========================================================================
--- Script-local state. One shared control connection and a small per-tab table
--- of in-flight handles, exactly mirroring how the library itself keeps state
--- script-local rather than per-object (every tab shares one oxConnectControl).
+-- Script-local state. The demo tracks just enough state to drive the status bar
+-- and the button enable/disable logic; the authoritative state lives in OnionXT.
 -- ==========================================================================
 
 local sTab                  -- the currently visible tab key
-local sDialStream           -- the Dial tab's stream handle, or empty
-local sSvcHandle            -- the Service tab's published service handle, or empty
 local sTabControls          -- array: tab key -> comma list of that tab's control names
-
--- NOTE on the UI: controls are created directly on the card and shown/hidden by
--- name per tab (sTabControls); OnionXT does NOT reparent them into groups. LiveCode
--- has no "set the owner" reparent (owner is read-only), and copy/relayer grouping
--- is fiddly to do blind, so the demo just toggles visibility, which is simple and
--- valid. This UI-construction path still wants an on-engine pass (the create/set
--- object calls), but it uses no invalid reparenting.
+local sConnState            -- control-connection state, mirrored from onStatus
+local sBootPct              -- last bootstrap percent seen (0..100)
+local sDialStream           -- the Dial tab's stream handle, or empty
+local sDialOpen             -- true once the dial stream's "open" event arrived
+local sSvcHandle            -- the Service tab's published service handle, or empty
 
 on preOpenStack
-   -- Build the whole UI in script; no IDE design work required (matches the
-   -- family convention). Point OnionXT's callbacks at this stack's script.
+   -- Size and centre the window, then build the whole UI in script (no IDE design
+   -- work). Point OnionXT's callbacks at this stack's script.
+   set the width of this stack to kWinWidth
+   set the height of this stack to kWinHeight
+   set the backgroundColor of this stack to demoColor("bg")
    oxSetCallbackOwner the long id of me
    oxSetStatusCallback "onStatus"
    oxSetPeerCallback "onPeer"
    put "stat" into sTab
+   put "disconnected" into sConnState
+   put 0 into sBootPct
    demoBuildChrome
    demoBuildStatusTab
    demoBuildDialTab
@@ -78,36 +81,53 @@ on preOpenStack
    demoBuildAddressTab
    demoBuildAboutTab
    demoShowTab "stat"
+   demoUpdateStatusBar
+   demoUpdateButtons
    pass preOpenStack
 end preOpenStack
 
 -- ==========================================================================
--- Color palette. One function, literal RGB triples, so every control gets a
--- consistent look (SodiumXT's clr() convention).
+-- Palette: one function, literal RGB triples, so every control is consistent.
 -- ==========================================================================
 
 private function demoColor pName
+   -- Multi-line block form (the return on its own line), matching the library's
+   -- own chained-if idiom; the single-line "then return" chain confuses the
+   -- static gate and is less certain on-engine.
    if pName is "header" then
-      return "20,30,60"
+      return "20,28,54"
+   else if pName is "headerText" then
+      return "236,240,248"
+   else if pName is "bg" then
+      return "244,246,250"
    else if pName is "panel" then
-      return "245,245,248"
+      return "255,255,255"
+   else if pName is "border" then
+      return "205,210,220"
    else if pName is "accent" then
-      return "40,90,190"
-   else if pName is "ok" then
-      return "20,140,60"
-   else if pName is "fail" then
-      return "190,40,40"
+      return "44,98,200"
+   else if pName is "tabIdle" then
+      return "225,229,236"
+   else if pName is "statusbar" then
+      return "30,36,52"
+   else if pName is "statusText" then
+      return "205,212,224"
    else if pName is "text" then
-      return "20,20,25"
+      return "28,32,40"
    else if pName is "muted" then
-      return "110,110,120"
+      return "108,116,130"
+   else if pName is "ok" then
+      return "22,140,70"
+   else if pName is "warn" then
+      return "176,120,20"
+   else if pName is "fail" then
+      return "198,54,54"
    end if
    return "0,0,0"
 end demoColor
 
 -- ==========================================================================
--- Control factory. Small, consistent helpers over the standard LiveCode object
--- commands, so every panel is built the same way.
+-- Control factory: consistent helpers over the standard LiveCode object commands.
 -- ==========================================================================
 
 private command demoMakeRect pName, pRect, pColorName
@@ -119,36 +139,90 @@ private command demoMakeRect pName, pRect, pColorName
    set the backgroundColor of graphic pName to demoColor(pColorName)
 end demoMakeRect
 
-private command demoMakeLabel pName, pRect, pText, pColorName
+private command demoMakeLabel pName, pRect, pText
+   -- A muted, right-nothing caption label; no border, blends with the window bg.
    create field pName
    set the rect of field pName to pRect
    set the text of field pName to pText
-   set the backgroundColor of field pName to demoColor("panel")
-   set the foregroundColor of field pName to demoColor(pColorName)
+   set the backgroundColor of field pName to demoColor("bg")
+   set the foregroundColor of field pName to demoColor("muted")
    set the borderWidth of field pName to 0
    set the threeD of field pName to false
    set the lockText of field pName to true
 end demoMakeLabel
 
-private command demoMakeInput pName, pRect, pDefaultText
+private command demoMakeTitle pName, pRect, pText
    create field pName
    set the rect of field pName to pRect
-   set the text of field pName to pDefaultText
-   set the borderWidth of field pName to 1
+   set the text of field pName to pText
+   set the backgroundColor of field pName to demoColor("bg")
+   set the foregroundColor of field pName to demoColor("text")
+   set the textStyle of field pName to "bold"
+   set the borderWidth of field pName to 0
    set the threeD of field pName to false
-end demoMakeInput
+   set the lockText of field pName to true
+end demoMakeTitle
 
-private command demoMakeOutput pName, pRect
-   -- A monospace, scrolling, append-only output box (the log / result display).
+private command demoMakeHint pName, pRect, pText
+   -- A muted, wrapping, multi-line caption (torrc reference, blurb, etc.).
    create field pName
    set the rect of field pName to pRect
-   set the text of field pName to empty
-   set the textFont of field pName to "Courier,Monaco,monospace"
-   set the borderWidth of field pName to 1
+   set the text of field pName to pText
+   set the backgroundColor of field pName to demoColor("bg")
+   set the foregroundColor of field pName to demoColor("muted")
+   set the borderWidth of field pName to 0
    set the threeD of field pName to false
    set the lockText of field pName to true
    set the dontWrap of field pName to false
-end demoMakeOutput
+end demoMakeHint
+
+private command demoMakeInput pName, pRect, pDefaultText, pMono
+   create field pName
+   set the rect of field pName to pRect
+   set the text of field pName to pDefaultText
+   set the backgroundColor of field pName to demoColor("panel")
+   set the foregroundColor of field pName to demoColor("text")
+   set the borderColor of field pName to demoColor("border")
+   set the borderWidth of field pName to 1
+   set the threeD of field pName to false
+   set the opaque of field pName to true
+   if pMono is "mono" then
+      set the textFont of field pName to kMono
+   end if
+end demoMakeInput
+
+private command demoMakeValue pName, pRect
+   -- A locked, monospace, single-line display of one value (address, pubkey).
+   create field pName
+   set the rect of field pName to pRect
+   set the text of field pName to empty
+   set the backgroundColor of field pName to demoColor("panel")
+   set the foregroundColor of field pName to demoColor("text")
+   set the borderColor of field pName to demoColor("border")
+   set the borderWidth of field pName to 1
+   set the threeD of field pName to false
+   set the opaque of field pName to true
+   set the lockText of field pName to true
+   set the textFont of field pName to kMono
+   set the dontWrap of field pName to true
+end demoMakeValue
+
+private command demoMakeLog pName, pRect
+   -- A locked, monospace, scrolling, append-only log / output box.
+   create field pName
+   set the rect of field pName to pRect
+   set the text of field pName to empty
+   set the backgroundColor of field pName to demoColor("panel")
+   set the foregroundColor of field pName to demoColor("text")
+   set the borderColor of field pName to demoColor("border")
+   set the borderWidth of field pName to 1
+   set the threeD of field pName to false
+   set the opaque of field pName to true
+   set the lockText of field pName to true
+   set the textFont of field pName to kMono
+   set the dontWrap of field pName to false
+   set the vScrollbar of field pName to true
+end demoMakeLog
 
 private command demoMakeButton pName, pRect, pLabel
    create button pName
@@ -158,27 +232,40 @@ private command demoMakeButton pName, pRect, pLabel
 end demoMakeButton
 
 -- ==========================================================================
--- Chrome: header bar and the tab strip. Tab buttons are named "tabbtn:<key>";
--- clicking one shows that tab and restyles the strip.
+-- Chrome: header bar, tab strip, and the persistent bottom status bar.
 -- ==========================================================================
 
 private command demoBuildChrome
-   demoMakeRect "chrome:header", "0,0,760,40", "header"
-   demoMakeLabel "chrome:title", "12,8,400,32", "OnionXT demo", "panel"
-   set the foregroundColor of field "chrome:title" to "255,255,255"
-   set the textStyle of field "chrome:title" to "bold"
+   demoMakeRect "chrome:header", "0,0," & kWinWidth & ",46", "header"
+   demoMakeTitle "chrome:title", "24,10,520,38", "OnionXT demo"
+   -- The title/subtitle sit ON the dark header, so their backgrounds must be the
+   -- header colour, not the light window bg, or light text lands on a light box.
+   set the backgroundColor of field "chrome:title" to demoColor("header")
+   set the foregroundColor of field "chrome:title" to demoColor("headerText")
+   demoMakeLabel "chrome:subtitle", "360,14,796,38", "Tor transport + self-authenticating rendezvous"
+   set the backgroundColor of field "chrome:subtitle" to demoColor("header")
+   set the foregroundColor of field "chrome:subtitle" to demoColor("statusText")
+   set the textAlign of field "chrome:subtitle" to "right"
 
    local tNames, tI, tKey, tX, tSaved
    put "Status,Dial,Service,Address,About" into tNames
-   put 0 into tX
+   put 24 into tX
    put the itemDelimiter into tSaved
    set the itemDelimiter to comma
    repeat with tI = 1 to the number of items of kDemoTabs
       put item tI of kDemoTabs into tKey
-      demoMakeButton "tabbtn:" & tKey, (12 + tX) & ",48," & (12 + tX + 100) & ",76", item tI of tNames
-      add 108 to tX
+      demoMakeButton "tabbtn:" & tKey, tX & ",54," & (tX + 112) & ",84", item tI of tNames
+      add 118 to tX
    end repeat
    set the itemDelimiter to tSaved
+
+   -- The bottom status bar is chrome (never in a tab list), so it stays visible
+   -- on every tab and gives constant feedback about the tor connection.
+   demoMakeRect "chrome:statusrect", "0," & (kWinHeight - 44) & "," & kWinWidth & "," & kWinHeight, "statusbar"
+   demoMakeLabel "chrome:statusbar", "24," & (kWinHeight - 34) & ",796," & (kWinHeight - 10), ""
+   set the backgroundColor of field "chrome:statusbar" to demoColor("statusbar")
+   set the foregroundColor of field "chrome:statusbar" to demoColor("statusText")
+
    demoRestyleTabs
 end demoBuildChrome
 
@@ -209,7 +296,7 @@ private command demoRestyleTabs
          set the backgroundColor of button ("tabbtn:" & tKey) to demoColor("accent")
          set the foregroundColor of button ("tabbtn:" & tKey) to "255,255,255"
       else
-         set the backgroundColor of button ("tabbtn:" & tKey) to demoColor("panel")
+         set the backgroundColor of button ("tabbtn:" & tKey) to demoColor("tabIdle")
          set the foregroundColor of button ("tabbtn:" & tKey) to demoColor("text")
       end if
    end repeat
@@ -217,30 +304,76 @@ private command demoRestyleTabs
 end demoRestyleTabs
 
 -- ==========================================================================
--- Tab: Status. Connects the ONE shared control connection every other tab
--- relies on, and shows bootstrap progress and the tor version (docs/03, 07).
+-- The status bar and button-enable logic: the flow's feedback, updated from the
+-- callbacks so the UI always reflects the real connection state.
+-- ==========================================================================
+
+private command demoUpdateStatusBar
+   local tState, tColor
+   put sConnState into tState
+   if tState is empty then
+      put "disconnected" into tState
+   end if
+   if tState is "authenticated" then
+      put "ok" into tColor
+   else if tState is "failed" then
+      put "fail" into tColor
+   else
+      put "statusText" into tColor
+   end if
+   put "Tor control: " & tState & "     Bootstrap: " & sBootPct & "%" into field "chrome:statusbar"
+   set the foregroundColor of field "chrome:statusbar" to demoColor(tColor)
+end demoUpdateStatusBar
+
+private command demoUpdateButtons
+   -- Enable each action only when it is currently valid, so a disabled button
+   -- (which cannot be clicked) tells the user what to do next.
+   local tConnected
+   put (sConnState is not "disconnected" and sConnState is not "failed" and sConnState is not empty) into tConnected
+   set the enabled of button "stat:connect" to (not tConnected)
+   set the enabled of button "stat:disconnect" to tConnected
+   set the enabled of button "svc:publish" to oxIsControlAuthenticated()
+   set the enabled of button "svc:remove" to (sSvcHandle is not empty)
+   set the enabled of button "dial:send" to (sDialOpen is true)
+end demoUpdateButtons
+
+private command demoSetStatus pField, pText, pColorName
+   set the foregroundColor of field pField to demoColor(pColorName)
+   put pText into field pField
+end demoSetStatus
+
+private command demoAppendLog pField, pText
+   -- Append a line and scroll to the bottom (formattedHeight is the full content
+   -- height; setting scroll past the max clamps to the bottom).
+   put pText & return after field pField
+   set the scroll of field pField to the formattedHeight of field pField
+end demoAppendLog
+
+-- ==========================================================================
+-- Tab: Status. Connects the ONE shared control connection every other tab relies
+-- on (docs/03, 07). The bottom status bar shows live bootstrap / control state.
 -- ==========================================================================
 
 private command demoBuildStatusTab
-   demoMakeLabel "stat:hdr", "20,90,700,114", "Control connection and bootstrap", "text"
-   demoMakeLabel "stat:socksLbl", "20,124,140,146", "SOCKS port:", "muted"
-   demoMakeInput "stat:socks", "150,120,260,146", kDemoDefaultSocksPort
-   demoMakeLabel "stat:ctlLbl", "280,124,400,146", "Control port:", "muted"
-   demoMakeInput "stat:ctl", "410,120,520,146", kDemoDefaultControlPort
-   demoMakeButton "stat:connect", "540,118,650,148", "Connect"
-   demoMakeButton "stat:disconnect", "660,118,760,148", "Disconnect"
-   demoMakeLabel "stat:status", "20,158,740,182", "not connected", "muted"
-   demoMakeLabel "stat:bar", "20,190,740,208", "bootstrap: 0%", "muted"
-   demoMakeLabel "stat:version", "20,216,740,238", "version: " & oxVersion(), "muted"
-   demoMakeLabel "stat:hint", "20,250,740,320", \
+   demoMakeTitle "stat:title", "24,100,796,124", "1. Connect to the tor control port"
+   demoMakeHint "stat:hint", "24,128,796,150", \
+      "Start here. Publishing an onion service and reading bootstrap progress need this connection."
+   demoMakeLabel "stat:socksLbl", "24,166,124,188", "SOCKS port:"
+   demoMakeInput "stat:socks", "128,163,220,189", kDemoDefaultSocksPort, ""
+   demoMakeLabel "stat:ctlLbl", "240,166,344,188", "Control port:"
+   demoMakeInput "stat:ctl", "348,163,440,189", kDemoDefaultControlPort, ""
+   demoMakeButton "stat:connect", "468,161,588,191", "Connect"
+   demoMakeButton "stat:disconnect", "596,161,716,191", "Disconnect"
+   demoMakeLabel "stat:detail", "24,206,796,244", "not connected"
+   demoMakeLabel "stat:version", "24,250,796,272", "version: " & oxVersion()
+   demoMakeHint "stat:torrc", "24,292,796,400", \
       "Needs a tor daemon reachable on loopback. Reference torrc:" & return & \
-      "SocksPort 9050" & return & "ControlPort 9051" & return & \
-      "CookieAuthentication 1" & return & \
-      "(Tor Browser: SOCKS 9150, control 9151.)", "muted"
+      "    SocksPort 9050" & return & "    ControlPort 9051" & return & \
+      "    CookieAuthentication 1" & return & \
+      "(Tor Browser uses SOCKS 9150, control 9151, and needs the control port enabled.)"
 
-   local tNames
-   put "hdr,socksLbl,socks,ctlLbl,ctl,connect,disconnect,status,bar,version,hint" into tNames
-   demoRegisterTab "stat", tNames
+   demoRegisterTab "stat", \
+      "title,hint,socksLbl,socks,ctlLbl,ctl,connect,disconnect,detail,version,torrc"
 end demoBuildStatusTab
 
 private command handleStat pRole
@@ -248,42 +381,50 @@ private command handleStat pRole
       local tError
       oxSetSocksPort field "stat:socks"
       oxSetControlPort field "stat:ctl"
-      set the foregroundColor of field "stat:status" to demoColor("muted")
-      put "connecting..." into field "stat:status"
+      put "connecting" into sConnState
+      demoSetStatus "stat:detail", "connecting to 127.0.0.1:" & (field "stat:ctl") & " ...", "muted"
+      demoUpdateStatusBar
+      demoUpdateButtons
       oxConnectControl
       put the result into tError
       if tError is not empty then
-         set the foregroundColor of field "stat:status" to demoColor("fail")
-         put tError into field "stat:status"
+         put "failed" into sConnState
+         demoSetStatus "stat:detail", tError, "fail"
+         demoUpdateStatusBar
+         demoUpdateButtons
       end if
    else if pRole is "disconnect" then
       oxDisconnectControl
-      set the foregroundColor of field "stat:status" to demoColor("muted")
-      put "disconnected" into field "stat:status"
-      put "bootstrap: 0%" into field "stat:bar"
+      put "disconnected" into sConnState
+      put 0 into sBootPct
+      demoSetStatus "stat:detail", "disconnected", "muted"
+      demoUpdateStatusBar
+      demoUpdateButtons
    end if
 end handleStat
 
 -- ==========================================================================
--- Tab: Dial. Outbound SOCKS5 through Tor (docs/02): dial, then send/receive
--- once the "open" stream event arrives.
+-- Tab: Dial. Outbound SOCKS5 through Tor (docs/02): dial, then send/receive once
+-- the "open" stream event arrives. Needs a running tor SOCKS proxy, not control.
 -- ==========================================================================
 
 private command demoBuildDialTab
-   demoMakeLabel "dial:hdr", "20,90,700,114", "Dial a host through Tor (SOCKS5)", "text"
-   demoMakeLabel "dial:hostLbl", "20,124,80,146", "Host:", "muted"
-   demoMakeInput "dial:host", "90,120,560,146", kDemoDefaultDialHost
-   demoMakeLabel "dial:portLbl", "570,124,610,146", "Port:", "muted"
-   demoMakeInput "dial:port", "620,120,700,146", kDemoDefaultDialPort
-   demoMakeButton "dial:go", "20,154,140,182", "Dial"
-   demoMakeLabel "dial:status", "150,158,760,180", "not dialed", "muted"
-   demoMakeInput "dial:msg", "20,192,600,218", "GET / HTTP/1.0" & return & return
-   demoMakeButton "dial:send", "610,190,730,220", "Send"
-   demoMakeOutput "dial:log", "20,230,740,420"
+   demoMakeTitle "dial:title", "24,100,796,124", "Dial a host through Tor (SOCKS5)"
+   demoMakeHint "dial:hint", "24,128,796,150", \
+      "The far end never sees your IP. The name is resolved inside Tor (ATYP=3), never locally."
+   demoMakeLabel "dial:hostLbl", "24,166,74,188", "Host:"
+   demoMakeInput "dial:host", "80,163,600,189", kDemoDefaultDialHost, "mono"
+   demoMakeLabel "dial:portLbl", "616,166,658,188", "Port:"
+   demoMakeInput "dial:port", "662,163,748,189", kDemoDefaultDialPort, ""
+   demoMakeButton "dial:go", "24,199,148,229", "Dial"
+   demoMakeLabel "dial:status", "160,203,796,227", "not dialed"
+   demoMakeLabel "dial:msgLbl", "24,241,120,263", "Request:"
+   demoMakeInput "dial:msg", "124,238,648,300", "GET / HTTP/1.0" & return & return, "mono"
+   demoMakeButton "dial:send", "664,238,784,268", "Send"
+   demoMakeLog "dial:log", "24,312,796,500"
 
-   local tNames
-   put "hdr,hostLbl,host,portLbl,port,go,status,msg,send,log" into tNames
-   demoRegisterTab "dial", tNames
+   demoRegisterTab "dial", \
+      "title,hint,hostLbl,host,portLbl,port,go,status,msgLbl,msg,send,log"
 end demoBuildDialTab
 
 private command handleDial pRole
@@ -296,9 +437,10 @@ end handleDial
 
 private command demoStartDial
    local tHandle
+   put false into sDialOpen
    put empty into field "dial:log"
-   put "dialing..." into field "dial:status"
-   set the foregroundColor of field "dial:status" to demoColor("muted")
+   demoSetStatus "dial:status", "dialing " & (field "dial:host") & " ...", "muted"
+   demoUpdateButtons
    oxDial field "dial:host", (field "dial:port")
    put the result into tHandle
    if tHandle is an integer then
@@ -306,64 +448,72 @@ private command demoStartDial
       oxSetStreamCallback sDialStream, "onDialStream"
    else
       put empty into sDialStream
-      set the foregroundColor of field "dial:status" to demoColor("fail")
-      put tHandle into field "dial:status"
+      demoSetStatus "dial:status", tHandle, "fail"
    end if
 end demoStartDial
 
 private command demoSendDial
-   if sDialStream is empty then
-      set the foregroundColor of field "dial:status" to demoColor("fail")
-      put "not connected yet" into field "dial:status"
+   if not sDialOpen then
+      demoSetStatus "dial:status", "the tunnel is not open yet", "warn"
       exit demoSendDial
    end if
-   oxWrite sDialStream, textEncode(field "dial:msg", "UTF-8")
-   put field "dial:log" & return & "> (sent " & (the number of chars of field "dial:msg") & " chars)" into field "dial:log"
+   -- Convert the request's line endings to CRLF (what HTTP wants) and send it as
+   -- bytes. OnionXT does not encrypt; a real protocol would seal with SodiumXT.
+   local tRequest
+   put field "dial:msg" into tRequest
+   replace return with (numToChar(13) & numToChar(10)) in tRequest
+   oxWrite sDialStream, textEncode(tRequest, "UTF-8")
+   demoAppendLog "dial:log", "> sent " & (the number of bytes of textEncode(tRequest, "UTF-8")) & " bytes"
 end demoSendDial
 
--- The stream callback for the Dial tab. Stale-guard against a handle that has
--- already moved on (the app may have redialed since this event was queued).
+-- The Dial tab's stream callback. Stale-guard against a handle that has already
+-- moved on (the app may have redialed since this event was queued).
 on onDialStream pStream, pEvent, pData
    if pStream is not sDialStream then
       exit onDialStream
    end if
    if pEvent is "open" then
-      set the foregroundColor of field "dial:status" to demoColor("ok")
-      put "connected" into field "dial:status"
+      put true into sDialOpen
+      demoSetStatus "dial:status", "tunnel open - send your request", "ok"
+      demoUpdateButtons
    else if pEvent is "data" then
-      put field "dial:log" & return & textDecode(pData, "UTF-8") into field "dial:log"
+      demoAppendLog "dial:log", textDecode(pData, "UTF-8")
    else if pEvent is "closed" then
-      set the foregroundColor of field "dial:status" to demoColor("muted")
-      put "closed" into field "dial:status"
+      put false into sDialOpen
       put empty into sDialStream
+      demoSetStatus "dial:status", "connection closed", "muted"
+      demoAppendLog "dial:log", "-- closed --"
+      demoUpdateButtons
    else if pEvent is "error" then
-      set the foregroundColor of field "dial:status" to demoColor("fail")
-      put pData into field "dial:status"
+      put false into sDialOpen
       put empty into sDialStream
+      demoSetStatus "dial:status", pData, "fail"
+      demoUpdateButtons
    end if
 end onDialStream
 
 -- ==========================================================================
--- Tab: Service. Publish a v3 onion (docs/03/04), accept an inbound peer, and
--- echo bytes back. Needs the Status tab's control connection authenticated.
+-- Tab: Service. Publish a v3 onion (docs/03/04), accept an inbound peer, and echo
+-- bytes back. Requires the Status tab's control connection to be authenticated.
 -- ==========================================================================
 
 private command demoBuildServiceTab
-   demoMakeLabel "svc:hdr", "20,90,700,114", "Publish an onion service", "text"
-   demoMakeLabel "svc:vLbl", "20,124,100,146", "Virtual port:", "muted"
-   demoMakeInput "svc:vport", "110,120,190,146", 80
-   demoMakeLabel "svc:lLbl", "200,124,290,146", "Local port:", "muted"
-   demoMakeInput "svc:lport", "300,120,380,146", 8080
-   demoMakeButton "svc:publish", "20,154,160,182", "Publish (random key)"
-   demoMakeButton "svc:remove", "170,154,290,182", "Remove"
-   demoMakeLabel "svc:status", "300,158,760,180", "not published", "muted"
-   demoMakeLabel "svc:addrLbl", "20,192,120,214", "Address:", "muted"
-   demoMakeOutput "svc:address", "130,190,740,214"
-   demoMakeOutput "svc:log", "20,224,740,420"
+   demoMakeTitle "svc:title", "24,100,796,124", "Publish an onion service"
+   demoMakeHint "svc:hint", "24,128,796,150", \
+      "Requires an authenticated control connection (Status tab). Reachable at a global .onion, no port forwarding."
+   demoMakeLabel "svc:vLbl", "24,166,116,188", "Virtual port:"
+   demoMakeInput "svc:vport", "120,163,200,189", 80, ""
+   demoMakeLabel "svc:lLbl", "216,166,304,188", "Local port:"
+   demoMakeInput "svc:lport", "308,163,390,189", 8080, ""
+   demoMakeButton "svc:publish", "410,161,560,191", "Publish onion"
+   demoMakeButton "svc:remove", "568,161,688,191", "Remove"
+   demoMakeLabel "svc:status", "24,206,796,228", "not published"
+   demoMakeLabel "svc:addrLbl", "24,238,116,260", "Address:"
+   demoMakeValue "svc:address", "120,235,796,261"
+   demoMakeLog "svc:log", "24,274,796,500"
 
-   local tNames
-   put "hdr,vLbl,vport,lLbl,lport,publish,remove,status,addrLbl,address,log" into tNames
-   demoRegisterTab "svc", tNames
+   demoRegisterTab "svc", \
+      "title,hint,vLbl,vport,lLbl,lport,publish,remove,status,addrLbl,address,log"
 end demoBuildServiceTab
 
 private command handleSvc pRole
@@ -377,49 +527,49 @@ end handleSvc
 private command demoPublishService
    local tHandle
    if not oxIsControlAuthenticated() then
-      set the foregroundColor of field "svc:status" to demoColor("fail")
-      put "connect and authenticate on the Status tab first" into field "svc:status"
+      demoSetStatus "svc:status", "connect and authenticate on the Status tab first", "warn"
       exit demoPublishService
    end if
-   set the foregroundColor of field "svc:status" to demoColor("muted")
-   put "publishing..." into field "svc:status"
+   demoSetStatus "svc:status", "publishing ...", "muted"
    put empty into field "svc:address"
    put empty into field "svc:log"
    oxCreateService (field "svc:vport"), (field "svc:lport")
    put the result into tHandle
    if tHandle is an integer then
       put tHandle into sSvcHandle
+      demoAppendLog "svc:log", "service handle " & tHandle & " requested; awaiting ADD_ONION reply ..."
+      demoUpdateButtons
    else
-      set the foregroundColor of field "svc:status" to demoColor("fail")
-      put tHandle into field "svc:status"
+      demoSetStatus "svc:status", tHandle, "fail"
    end if
 end demoPublishService
 
 private command demoRemoveService
    if sSvcHandle is not empty then
       oxRemoveService sSvcHandle
+      demoAppendLog "svc:log", "removed service " & sSvcHandle
    end if
    put empty into sSvcHandle
    put empty into field "svc:address"
-   set the foregroundColor of field "svc:status" to demoColor("muted")
-   put "not published" into field "svc:status"
+   demoSetStatus "svc:status", "not published", "muted"
+   demoUpdateButtons
 end demoRemoveService
 
 -- The peer callback: a remote peer reached our onion. Register a per-stream
--- callback and echo whatever it sends (the same shape as examples/onion-roundtrip).
+-- callback and echo whatever it sends (the shape of examples/onion-roundtrip).
 on onPeer pStream, pService, pPeerAddr
    oxSetStreamCallback pStream, "onSvcPeerStream"
-   put field "svc:log" & return & "peer connected from " & pPeerAddr into field "svc:log"
+   demoAppendLog "svc:log", "peer connected from " & pPeerAddr
 end onPeer
 
 on onSvcPeerStream pStream, pEvent, pData
    if pEvent is "data" then
-      put field "svc:log" & return & "< " & (the number of bytes of pData) & " bytes (echoing)" into field "svc:log"
+      demoAppendLog "svc:log", "< " & (the number of bytes of pData) & " bytes (echoing back)"
       oxWrite pStream, pData
    else if pEvent is "closed" then
-      put field "svc:log" & return & "peer closed" into field "svc:log"
+      demoAppendLog "svc:log", "peer closed"
    else if pEvent is "error" then
-      put field "svc:log" & return & "peer error: " & pData into field "svc:log"
+      demoAppendLog "svc:log", "peer error: " & pData
    end if
 end onSvcPeerStream
 
@@ -429,18 +579,20 @@ end onSvcPeerStream
 -- ==========================================================================
 
 private command demoBuildAddressTab
-   demoMakeLabel "addr:hdr", "20,90,700,114", "Address tools (pure, no network)", "text"
-   demoMakeLabel "addr:pasteLbl", "20,124,140,146", "Onion address:", "muted"
-   demoMakeInput "addr:paste", "150,120,600,146", kDemoKnownAddress
-   demoMakeButton "addr:decode", "610,118,730,148", "Decode"
-   demoMakeOutput "addr:pubkey", "20,156,740,180"
-   demoMakeButton "addr:encode", "20,190,180,218", "Re-encode from pubkey"
-   demoMakeOutput "addr:reencoded", "190,190,740,218"
-   demoMakeLabel "addr:validLbl", "20,228,740,252", "", "muted"
+   demoMakeTitle "addr:title", "24,100,796,124", "Address tools (pure, no network)"
+   demoMakeHint "addr:hint", "24,128,796,150", \
+      "A v3 .onion address IS an ed25519 public key. Decoding needs no crypto; re-encoding needs SodiumXT SHA3-256 (deferred)."
+   demoMakeLabel "addr:pasteLbl", "24,166,150,188", "Onion address:"
+   demoMakeInput "addr:paste", "158,163,636,189", kDemoKnownAddress, "mono"
+   demoMakeButton "addr:decode", "652,161,772,191", "Decode"
+   demoMakeLabel "addr:pubLbl", "24,206,150,228", "Public key:"
+   demoMakeValue "addr:pubkey", "158,203,796,229"
+   demoMakeButton "addr:encode", "24,239,224,269", "Re-encode from key"
+   demoMakeValue "addr:reencoded", "236,240,796,266"
+   demoMakeLabel "addr:valid", "24,284,796,322", ""
 
-   local tNames
-   put "hdr,pasteLbl,paste,decode,pubkey,encode,reencoded,validLbl" into tNames
-   demoRegisterTab "addr", tNames
+   demoRegisterTab "addr", \
+      "title,hint,pasteLbl,paste,decode,pubLbl,pubkey,encode,reencoded,valid"
 end demoBuildAddressTab
 
 private command handleAddr pRole
@@ -452,7 +604,7 @@ private command handleAddr pRole
 end handleAddr
 
 private command demoDecodeAddress
-   local tAddress, tPub, tValid
+   local tAddress, tPub
    put field "addr:paste" into tAddress
    put oxPublicKeyFromAddress(tAddress) into tPub
    if the number of bytes of tPub is 32 then
@@ -460,48 +612,52 @@ private command demoDecodeAddress
    else
       put "(not a structurally valid v3 address)" into field "addr:pubkey"
    end if
-   put oxIsValidAddress(tAddress) into tValid
-   if tValid then
-      set the foregroundColor of field "addr:validLbl" to demoColor("ok")
-      put "structurally valid (checksum verified if SodiumXT SHA3-256 is available)" into field "addr:validLbl"
+   if oxIsValidAddress(tAddress) then
+      demoSetStatus "addr:valid", "structurally valid (checksum also verified when SodiumXT SHA3-256 is available)", "ok"
    else
-      set the foregroundColor of field "addr:validLbl" to demoColor("fail")
-      put "not a valid v3 onion address" into field "addr:validLbl"
+      demoSetStatus "addr:valid", "not a valid v3 onion address", "fail"
    end if
 end demoDecodeAddress
 
 private command demoEncodeAddress
-   local tPubHex, tPub, tAddr
+   local tPubHex, tAddr
    put field "addr:pubkey" into tPubHex
    if the number of chars of tPubHex is not 64 then
-      put "(decode an address above first, or paste a 64-hex-char pubkey)" into field "addr:reencoded"
+      put empty into field "addr:reencoded"
+      demoSetStatus "addr:valid", "decode an address above first, or paste a 64-hex-char public key", "warn"
       exit demoEncodeAddress
    end if
-   put binaryEncode("H*", tPubHex) into tPub
-   put oxAddressFromPublicKey(tPub) into tAddr
-   put tAddr into field "addr:reencoded"
+   -- Re-encode needs the SHA3-256 checksum (SodiumXT gap #2, deferred), so a
+   -- capability error comes back as an "OnionXT:" string, not an address. Route
+   -- it to the wrapping status line instead of the cramped single-line field.
+   put oxAddressFromPublicKey(binaryEncode("H*", tPubHex)) into tAddr
+   if tAddr begins with "OnionXT:" then
+      put empty into field "addr:reencoded"
+      demoSetStatus "addr:valid", tAddr, "warn"
+   else
+      put tAddr into field "addr:reencoded"
+      demoSetStatus "addr:valid", "re-encoded; matches the pasted address when the key is unchanged", "ok"
+   end if
 end demoEncodeAddress
 
 -- ==========================================================================
--- Tab: About. Capability flags (which SodiumXT primitives are composed) and
--- the self-test entry point.
+-- Tab: About. Version, the composition story, capability flags, and the
+-- self-test entry point.
 -- ==========================================================================
 
 private command demoBuildAboutTab
-   demoMakeLabel "about:hdr", "20,90,700,114", "OnionXT " & oxVersion(), "text"
-   demoMakeLabel "about:blurb", "20,120,740,190", \
-      "A Tor transport and self-authenticating rendezvous layer for OXT/LiveCode." & return & \
-      "Adds no cryptography (composes SodiumXT ABI >= 6 for seed-derived onions and" & return & \
-      "SAFECOOKIE); assumes a locally-running tor daemon. Status: designed and" & return & \
-      "statically reasoned; needs an on-engine pass against a real daemon (CLAUDE.md).", "muted"
-   demoMakeLabel "about:capsLbl", "20,198,300,220", "Capabilities (oxTransportInfo):", "text"
-   demoMakeOutput "about:caps", "20,224,740,300"
-   demoMakeButton "about:runTests", "20,310,220,340", "Run self-test"
-   demoMakeOutput "about:testlog", "20,346,740,420"
+   demoMakeTitle "about:title", "24,100,796,124", "OnionXT " & oxVersion()
+   demoMakeHint "about:blurb", "24,130,796,224", \
+      "A Tor transport and self-authenticating rendezvous layer for OXT / LiveCode." & return & \
+      "Adds no cryptography of its own: it composes SodiumXT (ABI >= 6) for the" & return & \
+      "seed-derived onion key and SAFECOOKIE HMAC, and assumes a locally-running tor" & return & \
+      "daemon. Status: designed and statically reasoned; needs an on-engine pass."
+   demoMakeLabel "about:capsLbl", "24,232,796,254", "Capabilities (oxTransportInfo):"
+   demoMakeLog "about:caps", "24,258,796,352"
+   demoMakeButton "about:runTests", "24,362,224,392", "Run self-test"
+   demoMakeLog "about:testlog", "24,400,796,500"
 
-   local tNames
-   put "hdr,blurb,capsLbl,caps,runTests,testlog" into tNames
-   demoRegisterTab "about", tNames
+   demoRegisterTab "about", "title,blurb,capsLbl,caps,runTests,testlog"
    demoShowCapabilities
 end demoBuildAboutTab
 
@@ -510,9 +666,9 @@ private command demoShowCapabilities
    put oxTransportInfo() into tInfo
    put "transport           : " & tInfo["transport"] & return into tOut
    put "version             : " & tInfo["version"] & return after tOut
-   put "safeCookieAuth      : " & tInfo["safeCookieAuth"] & return after tOut
-   put "deterministicOnion  : " & tInfo["deterministicOnion"] & return after tOut
-   put "offlineAddress      : " & tInfo["offlineAddress"] after tOut
+   put "safeCookieAuth      : " & tInfo["safeCookieAuth"] & "   (SodiumXT sxHmacSha256 + sxRandomBytes)" & return after tOut
+   put "deterministicOnion  : " & tInfo["deterministicOnion"] & "   (SodiumXT sxSignSeedToExpandedKey)" & return after tOut
+   put "offlineAddress      : " & tInfo["offlineAddress"] & "   (SodiumXT sxSha3_256, deferred gap #2)" after tOut
    put tOut into field "about:caps"
 end demoShowCapabilities
 
@@ -523,59 +679,70 @@ private command handleAbout pRole
 end handleAbout
 
 private command demoRunSelfTest
-   -- The full suite lives in the sibling file onionxt-tests.livecodescript,
-   -- started using as a library exactly like onionxt.livecodescript itself, so
-   -- oxSelfTest resolves through the normal message path (no explicit "to": a
-   -- dispatch "to" a specific object would NOT reach a separate library stack).
+   -- The full suite lives in the sibling onionxt-tests.livecodescript, started
+   -- using as a library so oxSelfTest resolves through the normal message path.
    -- Detect it missing the same way the library capability-gates SodiumXT.
    local tReport
    dispatch function "oxSelfTest"
    if it is "unhandled" then
-      put "onionxt-tests.livecodescript is not loaded; open it alongside this demo to run the self-test." into field "about:testlog"
+      put "onionxt-tests.livecodescript is not loaded; start using it alongside this demo to run the self-test." into field "about:testlog"
       exit demoRunSelfTest
    end if
    put the result into tReport
    put tReport into field "about:testlog"
+   set the scroll of field "about:testlog" to 0
 end demoRunSelfTest
 
 -- ==========================================================================
--- Shared status callback: bootstrap, service address, and readiness updates
--- from whichever tab is not currently focused still get shown where relevant.
+-- Shared status callback: control state, bootstrap, and service readiness. Drives
+-- the always-visible status bar and the button-enable logic, so background events
+-- (which may arrive while you are on another tab) always update the UI.
 -- ==========================================================================
 
 on onStatus pKind, pInfo
    if pKind is "control" then
       if pInfo is "authenticated" then
-         set the foregroundColor of field "stat:status" to demoColor("ok")
+         put "authenticated" into sConnState
+         demoSetStatus "stat:detail", "authenticated - ready", "ok"
+         put "version: " & oxVersion() into field "stat:version"
       else if pInfo begins with "authfailed" or pInfo begins with "error" then
-         set the foregroundColor of field "stat:status" to demoColor("fail")
+         put "failed" into sConnState
+         demoSetStatus "stat:detail", pInfo, "fail"
+      else if pInfo is "disconnected" then
+         put "disconnected" into sConnState
+         demoSetStatus "stat:detail", "disconnected", "muted"
       else
-         set the foregroundColor of field "stat:status" to demoColor("muted")
+         put pInfo into sConnState
+         demoSetStatus "stat:detail", pInfo, "muted"
       end if
-      put pInfo into field "stat:status"
+      demoUpdateStatusBar
+      demoUpdateButtons
    else if pKind is "bootstrap" then
-      put "bootstrap: " & pInfo & "%" into field "stat:bar"
+      put pInfo into sBootPct
+      demoUpdateStatusBar
+   else if pKind is "ready" then
+      put 100 into sBootPct
+      demoUpdateStatusBar
    else if pKind is "service" then
       put pInfo into field "svc:address"
-      set the foregroundColor of field "svc:status" to demoColor("muted")
-      put "published, awaiting descriptor upload" into field "svc:status"
+      demoSetStatus "svc:status", "published, awaiting descriptor upload ...", "warn"
+      demoAppendLog "svc:log", "address: " & pInfo
    else if pKind is "serviceReady" then
-      set the foregroundColor of field "svc:status" to demoColor("ok")
-      put "reachable" into field "svc:status"
+      demoSetStatus "svc:status", "reachable", "ok"
+      demoAppendLog "svc:log", "descriptor uploaded; the onion is reachable"
    end if
 end onStatus
 
 -- ==========================================================================
--- Central click router: parse "prefix:role" from the clicked control's short
--- name and dispatch to that tab's handler (SodiumXT's routing convention).
+-- Central click router: parse "prefix:role" from the clicked control's short name
+-- and dispatch to that tab's handler. Disabled buttons never reach here.
 -- ==========================================================================
 
 on mouseUp
    local tName, tPrefix, tRole, tSaved
    put the short name of the target into tName
-   if the short name of the target begins with "tabbtn:" then
-      put char 8 to -1 of tName into tRole
-      demoShowTab tRole
+   if tName begins with "tabbtn:" then
+      demoShowTab (char 8 to -1 of tName)
       exit mouseUp
    end if
    if "chrome:" is in tName then
@@ -600,13 +767,20 @@ on mouseUp
    end if
 end mouseUp
 
+-- Free everything OnionXT opened when the demo closes (there is no deterministic
+-- unload hook; the app frees what it opened, CLAUDE.md).
+on closeStack
+   oxShutdown
+   pass closeStack
+end closeStack
+
 -- ==========================================================================
 -- Small local helpers (demo glue only, not part of the ox* surface).
 -- ==========================================================================
 
 private command demoRegisterTab pTabKey, pRoleList
-   -- Record this tab's full control names ("prefix:role") in sTabControls and
-   -- hide them; demoShowTab toggles their visibility. No groups, no reparenting.
+   -- Record this tab's full control names ("prefix:role") in sTabControls and hide
+   -- them; demoShowTab toggles their visibility. No groups, no reparenting.
    local tI, tRole, tSaved, tNames, tCtrl
    put the itemDelimiter into tSaved
    set the itemDelimiter to comma
@@ -626,11 +800,8 @@ private command demoRegisterTab pTabKey, pRoleList
 end demoRegisterTab
 
 private function demoBytesToHex pData
-   -- A local hex helper so this demo has no hidden dependency on OnionXT's
-   -- private internals; binaryDecode "H*" is the same primitive the library
-   -- itself uses for hex, just called from example glue instead of from inside
-   -- onionxt.livecodescript. binaryDecode is a function (returns the count and
-   -- fills the output var), so call it as one and `get` the discarded count.
+   -- binaryDecode is a function that fills its output var; `get` discards the
+   -- count (this is how the library's own oxBytesToHex works).
    local tHex
    get binaryDecode("H*", pData, tHex)
    return tHex
