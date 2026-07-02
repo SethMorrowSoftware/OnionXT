@@ -1129,6 +1129,18 @@ private function oxPow2 pN
    return tR
 end oxPow2
 
+private function oxIntDiv pA, pB
+   -- Integer division (floor, for the non-negative operands base32 uses) WITHOUT
+   -- the `div` operator, to sidestep any xTalk parser that mishandles div/mod/^
+   -- inside a compound expression. Operands here are small (base32 bit math).
+   return trunc(pA / pB)
+end oxIntDiv
+
+private function oxIntMod pA, pB
+   -- pA modulo pB WITHOUT the `mod` operator (see oxIntDiv).
+   return pA - pB * oxIntDiv(pA, pB)
+end oxIntMod
+
 private function oxBase32Encode pData
    -- RFC 4648 base32, lowercase, no padding. Pure bit-packing: accumulate input
    -- bytes MSB-first into a small buffer and emit 5-bit groups. The buffer is
@@ -1144,14 +1156,14 @@ private function oxBase32Encode pData
       add 8 to tBits
       repeat while tBits >= 5
          subtract 5 from tBits
-         put (tValue div oxPow2(tBits)) mod 32 into tIndex
+         put oxIntMod(oxIntDiv(tValue, oxPow2(tBits)), 32) into tIndex
          put char (tIndex + 1) of kOxBase32Alphabet after tOut
       end repeat
-      put tValue mod oxPow2(tBits) into tValue        -- keep only the pending bits
+      put oxIntMod(tValue, oxPow2(tBits)) into tValue        -- keep only the pending bits
    end repeat
    if tBits > 0 then
       -- Left-align the final partial group and emit it (canonical no-pad tail).
-      put (tValue * oxPow2(5 - tBits)) mod 32 into tIndex
+      put oxIntMod(tValue * oxPow2(5 - tBits), 32) into tIndex
       put char (tIndex + 1) of kOxBase32Alphabet after tOut
    end if
    return tOut
@@ -1176,9 +1188,9 @@ private function oxBase32Decode pText
       add 5 to tBits
       if tBits >= 8 then
          subtract 8 from tBits
-         put (tValue div oxPow2(tBits)) mod 256 into tByteOut
+         put oxIntMod(oxIntDiv(tValue, oxPow2(tBits)), 256) into tByteOut
          put numToByte(tByteOut) after tOut
-         put tValue mod oxPow2(tBits) into tValue
+         put oxIntMod(tValue, oxPow2(tBits)) into tValue
       end if
    end repeat
    return tOut
