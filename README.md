@@ -78,25 +78,101 @@ OnionXT/
   examples/
     socks-dial/             dial a host through Tor and read the reply
     onion-roundtrip/        two instances talk over Tor with no server, sealed by SodiumXT
-    onionxt-demo.livecodescript   an interactive, tabbed showcase of every ox* feature
+    onionxt-demo.livecodescript   interactive tabbed showcase: dial through Tor, publish an onion
+                                  (serves a page viewable in Tor Browser), and the address tools
     onionxt-tests.livecodescript  a pure, offline self-test harness (sPass/sFail, KATs)
 ```
 
 ## Status
 
-The library is **implemented**: `src/onionxt.livecodescript` has the full public `ox*` surface built
-out byte-for-byte against the specs (SOCKS5 dial, control-port connect + all four auth methods, onion
-services with a loopback accept loop, deterministic-from-seed addresses, base32 and the address<->key
-mapping, events and bootstrap, idempotent teardown, and the pluggable transport seam). It composes
-SodiumXT for every hash / HMAC / signature and adds no cryptography of its own.
+The library is **implemented and has been brought up on a live tor daemon.**
+`src/onionxt.livecodescript` has the full public `ox*` surface (SOCKS5 dial, control-port connect + all
+four auth methods, onion services with a loopback accept loop, deterministic-from-seed addresses, base32
+and the address<->key mapping, events and bootstrap, idempotent teardown, and the pluggable transport
+seam), and adds no cryptography of its own: it composes SodiumXT for every hash / HMAC / signature.
 
-It has **not run on an OXT engine yet.** The pure-compute paths (base32, the v3 address, the ed25519
-seed derivation) are pinned by known-answer vectors in `tools/onion-kat.py` and verified against two
-real onion addresses; the socket handshakes are designed and statically reasoned and are marked
-"designed and statically reasoned; needs an on-engine pass" against a real tor daemon, with each
-on-engine unknown flagged `VERIFY:` in the source. The static and house-style gates and the KAT
-self-check pass in CI. Start with [CLAUDE.md](CLAUDE.md), the [usage guide](docs/10-usage-guide.md),
-and [IMPLEMENTATION-PLAN.md](IMPLEMENTATION-PLAN.md).
+On-engine bring-up against a real tor daemon (and Tor Browser) has exercised the core paths end to end:
+dialing through the SOCKS proxy, connecting and authenticating on the control port (SAFECOOKIE),
+publishing a v3 onion service, and answering an inbound HTTP request so a published onion renders as a
+web page in Tor Browser (once the loopback forward port is one the OS allows binding, see
+[Troubleshooting](#troubleshooting)). The pure-compute paths (base32, the v3 address, the ed25519 seed
+derivation) are pinned by known-answer vectors in `tools/onion-kat.py`; a few advanced behaviours stay
+flagged `VERIFY:` in the source until each is separately exercised. The static and house-style gates and
+the KAT self-check run in CI on every push / PR.
+
+New here? Start with [CLAUDE.md](CLAUDE.md), the [usage guide](docs/10-usage-guide.md), the
+[Troubleshooting](#troubleshooting) section below, and [IMPLEMENTATION-PLAN.md](IMPLEMENTATION-PLAN.md).
+
+## Troubleshooting
+
+These are the failure modes a first-time setup actually hits (several were found during on-engine
+bring-up). The demo surfaces most of them with an actionable message. The raw socket error codes shown
+are the Windows Winsock names; other platforms print the text equivalent ("connection refused", etc.).
+
+### The control port refuses the connection (`Error 10061` / `WSAECONNREFUSED` / "connection refused")
+
+Nothing is listening on the control port. tor opens the SOCKS port by default but **not a control port**
+unless you ask for one, and **Tor Browser does not expose one at all**. Enable it, then restart tor:
+
+```
+ControlPort 9051
+CookieAuthentication 1
+```
+
+(in your `torrc`, or as flags: `tor --ControlPort 9051 --CookieAuthentication 1`). After restarting,
+tor's log should gain `Opening Control listener on 127.0.0.1:9051` beside the SOCKS line. Prefer cookie
+auth: OnionXT reads the cookie file automatically, so you never hand it a password. Match the ports:
+system tor is SOCKS `9050` / control `9051`; Tor Browser is SOCKS `9150` (no control). Full walkthrough:
+[docs/10-usage-guide.md](docs/10-usage-guide.md#1-start-a-tor-daemon).
+
+### Publishing fails to listen (`cannot listen on 127.0.0.1:<port>` / `Error 10013` or `10048`)
+
+The local forward port (the loopback port Tor forwards inbound onion traffic to) could not be bound:
+
+- `Error 10013` (`WSAEACCES`, permission denied): the port is **reserved or blocked by the OS**, not in
+  use. On Windows, Hyper-V / WSL2 / Docker Desktop reserve whole TCP port ranges and `8080` is a frequent
+  casualty. List the reserved ranges with (admin) `netsh int ipv4 show excludedportrange protocol=tcp`.
+- `Error 10048` (`WSAEADDRINUSE`): another process (often a leftover instance) already holds the port.
+
+Fix either by choosing a **different local port** (for example `8090` or `9099`); leave the **virtual
+port at 80** so the browser reaches `http://<address>.onion/` with no port. OnionXT fails closed on a
+bind error rather than publishing an onion whose traffic Tor would forward to a dead port.
+
+### The onion publishes but Tor Browser shows `ERR_EMPTY_RESPONSE`
+
+The rendezvous reached tor but no data came back. Check, in order:
+
+- **Are you visiting a fresh address?** An onion descriptor lingers in the DHT for ~3 hours after its
+  service is gone, so an address from an earlier run still resolves but has no live service. Publish
+  again and use the new address.
+- **Did the listen actually succeed?** A `cannot listen ...` error at publish (above) means Tor is
+  forwarding to a dead local port. Pick a free local port.
+- **Is the app still running with the control connection up?** OnionXT publishes with `Flags=Detach` so a
+  brief control-connection drop no longer un-publishes the service, but the app process (which holds the
+  loopback listener) must stay running while you visit.
+
+The service-side tor logging `Unable to find any hidden service associated identity key ... on
+rendezvous circuit` is the exact signature of "descriptor still cached, service gone": republish.
+
+### The onion is "not found" or will not connect at all
+
+The descriptor has not published yet. A cold tor takes tens of seconds to bootstrap (watch the bootstrap
+percent), and an onion service takes a few seconds more to upload its descriptor after `ADD_ONION`. Wait
+for the demo's green **"reachable"** status (the `HS_DESC UPLOADED` event) before visiting.
+
+### A dial fails with a SOCKS error
+
+Tor's SOCKS extended errors (`0xF0`-`0xF6`) map to clear messages (onion descriptor invalid, rendezvous
+failed, missing client auth, bad address, and so on); the usual cause is a `.onion` that is offline or a
+mistyped address. A plain "connection refused" on the SOCKS port itself means tor is not running there
+(SOCKS is `9050`, Tor Browser `9150`).
+
+### Deterministic onions or SAFECOOKIE auth report "needs SodiumXT ..."
+
+Those paths compose **SodiumXT ABI >= 6** (`sxSignSeedToExpandedKey`, `sxHmacSha256`): load SodiumXT into
+the message path alongside OnionXT. Plain dialing, Tor-generated onions, and COOKIE / NULL / password
+auth need no SodiumXT. (The offline address checksum needs SHA3-256, still deferred; tor authenticates
+the onion at connect time regardless, see [docs/08](docs/08-capabilities-required.md).)
 
 ## House style
 

@@ -152,7 +152,10 @@ SETEVENTS STATUS_CLIENT CIRC STREAM HS_DESC
 ```
 
 - `STATUS_CLIENT` carries `BOOTSTRAP PROGRESS=NN` lines: drive a bootstrap progress bar from these
-  (coalesce to <= ~4 Hz). Or poll `GETINFO status/bootstrap-phase`.
+  (coalesce to <= ~4 Hz). But those events only fire *while* tor is bootstrapping, so a daemon that is
+  already at 100% when you connect emits none and a UI seeded at 0 would stay there. Query the current
+  phase once right after authenticating with `GETINFO status/bootstrap-phase` (its reply carries the same
+  `PROGRESS=NN`) to seed the bar, then let the events update it. OnionXT does exactly this on connect.
 - `HS_DESC` reports when your onion descriptor is uploaded and the service is reachable, and when a
   descriptor fetch for a target you are dialing succeeds or fails.
 - Events arrive as `650` lines interleaved with command replies; the reader must demultiplex `650`
