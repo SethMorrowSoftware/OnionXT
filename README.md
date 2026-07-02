@@ -64,19 +64,34 @@ OnionXT/
     07-tor-lifecycle.md     assume-running vs launch-a-bundled-binary; bootstrap UX
     08-capabilities-required.md the small upstream gaps (SodiumXT SHA-512 / ed25519 expansion)
     09-open-questions.md    the honest to-do list
+    10-usage-guide.md       from-zero guide for any OXT app that uses OnionXT
   tools/
     check-livecodescript.py the static gate (carried verbatim from the family)
-  .github/workflows/ci.yml  static gate + docs house-style
+    check-docs-style.py     the prose house-style gate (no dashes / curly quotes)
+    onion-kat.py            known-answer vectors: base32, v3 address, ed25519 seed
+  .github/workflows/ci.yml  the three gates above, on every push / PR
   src/
-    onionxt.livecodescript  the library skeleton (public ox* handlers, stubbed)
-  examples/                 (to come) a two-instance onion round-trip harness
+    onionxt.livecodescript  the library (public ox* handlers, implemented)
+  examples/
+    socks-dial/             dial a host through Tor and read the reply
+    onion-roundtrip/        two instances talk over Tor with no server, sealed by SodiumXT
 ```
 
 ## Status
 
-Framework and plan only. Nothing here has run on an OXT engine yet. Every claim about runtime
-behaviour in these docs is "designed and statically reasoned; needs an on-engine pass" until an OXT
-build confirms it. Start with [CLAUDE.md](CLAUDE.md) and [IMPLEMENTATION-PLAN.md](IMPLEMENTATION-PLAN.md).
+The library is **implemented**: `src/onionxt.livecodescript` has the full public `ox*` surface built
+out byte-for-byte against the specs (SOCKS5 dial, control-port connect + all four auth methods, onion
+services with a loopback accept loop, deterministic-from-seed addresses, base32 and the address<->key
+mapping, events and bootstrap, idempotent teardown, and the Riptide transport seam). It composes
+SodiumXT for every hash / HMAC / signature and adds no cryptography of its own.
+
+It has **not run on an OXT engine yet.** The pure-compute paths (base32, the v3 address, the ed25519
+seed derivation) are pinned by known-answer vectors in `tools/onion-kat.py` and verified against two
+real onion addresses; the socket handshakes are designed and statically reasoned and are marked
+"designed and statically reasoned; needs an on-engine pass" against a real tor daemon, with each
+on-engine unknown flagged `VERIFY:` in the source. The static and house-style gates and the KAT
+self-check pass in CI. Start with [CLAUDE.md](CLAUDE.md), the [usage guide](docs/10-usage-guide.md),
+and [IMPLEMENTATION-PLAN.md](IMPLEMENTATION-PLAN.md).
 
 ## House style
 

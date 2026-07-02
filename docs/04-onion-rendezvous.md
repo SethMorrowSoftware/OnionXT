@@ -60,6 +60,13 @@ RH = h[32:64]                   # the nonce prefix
 expanded_secret = a || RH       # 64 bytes; base64 this for ADD_ONION ED25519-V3:
 ```
 
+The `base64` here is **standard RFC 4648 base64 with padding** (the `+`/`/` alphabet, not URL-safe): 64
+bytes encode to 88 characters ending in `==`. Tor emits its own `PrivateKey=ED25519-V3:<blob>` the same
+way, and accepts your bring-your-own key with or without padding; strip any whitespace before sending
+it. This is confirmed verbatim by the control-spec: the `ED25519-V3` blob is "the Base64 encoding of the
+concatenation of the 32-byte ed25519 secret scalar in little-endian and the 32-byte ed25519 PRF secret"
+(the clamped scalar `a` and the prefix `RH`), explicitly not a seed and not libsodium's `seed || pubkey`.
+
 This is the format Tor's own tools and the `stem` library produce, and getting it wrong is the classic
 deterministic-onion bug (the address comes out different, or ADD_ONION rejects the key). Two ways to
 get it right:

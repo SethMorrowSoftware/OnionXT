@@ -1,49 +1,128 @@
--- onionxt.livecodescript - the OnionXT library skeleton.
+-- onionxt.livecodescript - the OnionXT library.
 --
 -- OnionXT is a Tor transport and rendezvous layer for OpenXTalk / the xTalk
 -- family. It speaks SOCKS5 (RFC 1928 + Tor extensions) and the Tor control
--- protocol to a LOCALLY-RUNNING tor daemon; it does not embed or ship Tor.
--- It adds no cryptography (SodiumXT does that) and, in this v1 form, no native
--- code (the SOCKS5 and control clients are engine socket I/O).
+-- protocol to a LOCALLY-RUNNING tor daemon; it does not embed or ship Tor. It
+-- adds no cryptography (SodiumXT does that) and, in this form, no native code:
+-- the SOCKS5 and control clients are engine socket I/O, and base32 / the
+-- ed25519 scalar clamp are pure byte manipulation.
 --
--- THIS IS A SKELETON. Every public handler below is stubbed and reports that
--- it is not implemented. The bodies are built in the order of
--- IMPLEMENTATION-PLAN.md, against the byte- and line-level specs in
--- docs/02-socks5-client.md and docs/03-control-port.md. Nothing here has run on
--- an OXT engine yet: it is designed and statically reasoned, and needs an
--- on-engine pass against a real tor daemon.
+-- STATUS: designed and statically reasoned against the byte- and line-level
+-- specs in docs/02-socks5-client.md, docs/03-control-port.md and
+-- docs/04-onion-rendezvous.md, and against a grounded reading of the LiveCode
+-- socket idioms. It NEEDS AN ON-ENGINE PASS against a real tor daemon before any
+-- handshake can be called "working" (CLAUDE.md). Points that could only be
+-- settled on the engine are marked "VERIFY:" in comments.
 --
 -- Conventions (see CLAUDE.md): public API oxPascalCase; locals t..., params
--- p..., script-locals s..., constants k...; SOCKS5 is BINARY (byte / numToByte
--- / byteToNum), the control protocol is CRLF text; every socket op is async
--- (open / read / accept with message) so the one interpreter thread never
--- blocks on the network; loopback (127.0.0.1) only; every open has an
--- idempotent close.
+-- p..., script-locals s..., constants k...; SOCKS5 is BINARY (byte / numToByte /
+-- byteToNum), the control protocol is CRLF text; every socket op is async
+-- (open / read / accept with message) so the one interpreter thread never blocks
+-- on the network; loopback (127.0.0.1) only; every open has an idempotent close;
+-- every wire error fails closed and tears the resource down.
+--
+-- The async model (CLAUDE.md): oxDial and oxCreateService return a HANDLE
+-- immediately and complete later; the app learns the outcome through the
+-- callbacks below, never by a blocking return. The callback contracts are:
+--   status callback  <handler> pKind, pInfo
+--       pKind = "control"   pInfo = "connected"|"authenticated"|"disconnected"
+--                                   |"authfailed: <reason>"|"error: <reason>"
+--       pKind = "bootstrap" pInfo = 0..100          (coalesced to <= ~4 Hz)
+--       pKind = "ready"     pInfo = empty           (bootstrap reached 100)
+--       pKind = "service"   pInfo = <address>.onion (ADD_ONION returned it)
+--       pKind = "serviceReady" pInfo = <address>    (descriptor uploaded)
+--       pKind = "event"     pInfo = <raw 650 line>  (advanced; opt-in noise)
+--   stream callback  <handler> pStream, pEvent, pData
+--       pEvent = "open"   the SOCKS tunnel (or inbound peer) is live
+--       pEvent = "data"   pData is an inbound Data chunk (app frames its own)
+--       pEvent = "closed" the peer closed the stream
+--       pEvent = "error"  pData is the error; the stream has been torn down
+--   peer callback    <handler> pStream, pService, pPeerAddr
+--       a remote peer reached a published service; pStream is a fresh inbound
+--       stream handle (register a stream callback on it), pService its service
+--       handle, pPeerAddr the (loopback) peer address Tor forwarded from.
+--
+-- Callbacks are delivered with `dispatch` to the callback owner (oxSetCallbackOwner,
+-- default the topStack); a missing handler is a clean no-op, so an app wires only
+-- the callbacks it needs.
 
--- Loopback host is fixed; only the ports are configurable (and loopback-locked).
+-- ==========================================================================
+-- Constants. Loopback host is fixed; only the ports are configurable (and
+-- loopback-locked). Declared before first use (OXT resolves a constant by
+-- lexical position; a forward reference silently evaluates to nothing).
+-- ==========================================================================
+
 constant kOxHost = "127.0.0.1"
 constant kOxSocksPortDefault = 9050
 constant kOxControlPortDefault = 9051
-constant kOxVersion = "0.1.0-framework"
+constant kOxVersion = "1.0.0"
+
+-- A bootstrapping daemon accepts the TCP connection then stalls; bound every
+-- handshake so a silent stall becomes a clean error (docs/02 state machine).
+constant kOxHandshakeTimeout = 20000     -- milliseconds
+-- Coalesce bootstrap/status updates so a flood of 650 lines cannot thrash a
+-- field (CLAUDE.md: <= ~4 Hz). 250 ms = 4 Hz.
+constant kOxStatusThrottle = 250         -- milliseconds
+-- RFC 4648 base32, lowercase, no padding (docs/04). Pure bytes, no crypto.
+constant kOxBase32Alphabet = "abcdefghijklmnopqrstuvwxyz234567"
+-- The v3 address checksum preimage prefix and version byte (docs/04). SHA3-256
+-- of (kOxChecksumPrefix & pubkey & version) gives the 2-byte checksum; the hash
+-- itself is a SodiumXT call, never hand-rolled here.
+constant kOxChecksumPrefix = ".onion checksum"
+-- The two SAFECOOKIE HMAC key strings, verbatim from the Tor control-spec.
+constant kOxSafeCookieServerKey = "Tor safe cookie authentication server-to-controller hash"
+constant kOxSafeCookieClientKey = "Tor safe cookie authentication controller-to-server hash"
+
+-- ==========================================================================
+-- Script-local state. Handle tables are LiveCode associative arrays keyed by a
+-- small integer handle or by the engine's socket id; a stale or closed id must
+-- be a clean no-op / error, never a crash.
+-- ==========================================================================
 
 -- Configurable ports (default to a system tor; Tor Browser uses 9150 / 9151).
 local sSocksPort
 local sControlPort
--- Control-connection and bootstrap state (see docs/03-control-port.md).
-local sControlSocket        -- the engine id of the open control socket, or empty
-local sBootstrap            -- 0..100 bootstrap percent from STATUS_CLIENT
--- App-registered callback handler names.
-local sStatusCallback       -- coalesced bootstrap / event updates
-local sPeerCallback         -- a peer connected to one of our published services
--- Handle tables (script-side; a stale id must be a clean error, never a crash).
-local sStreams              -- dialed SOCKS streams, keyed by handle
-local sServices             -- published onion services, keyed by handle
+
+-- Control connection and bootstrap state (see docs/03-control-port.md).
+local sControlSocket        -- engine id of the open control socket, or empty
+local sControlState         -- disconnected|connecting|protocolinfo|authenticating|authenticated|failed
+local sControlMethods       -- offered auth methods (comma list) from PROTOCOLINFO
+local sControlCookieFile     -- cookie-file path from PROTOCOLINFO (unescaped)
+local sControlPassword       -- app-set password for HASHEDPASSWORD auth
+local sControlCookieBytes    -- the 32 raw cookie bytes (SAFECOOKIE flow)
+local sControlClientNonce    -- our SAFECOOKIE client nonce (raw bytes)
+local sControlTorVersion     -- tor version string from GETINFO version
+local sBootstrap             -- 0..100 bootstrap percent from STATUS_CLIENT
+
+-- Control command pipeline. One command in flight at a time so replies match
+-- commands (docs/03); further commands queue. Reply lines accumulate until the
+-- space-separated final line terminates the reply.
+local sCtlInFlight           -- label of the in-flight command, or empty
+local sCtlReplyLines         -- accumulated reply text (newline-joined)
+local sCtlInData             -- true while inside a 250+ CmdData block
+local sCtlData               -- accumulated CmdData block text
+local sCtlQueue              -- pending commands: lines of "label" & TAB & "command"
+
+-- App-registered callback handler names and the object they dispatch to.
+local sStatusCallback
+local sPeerCallback
+local sCallbackOwner         -- long id of the object whose script has the callbacks
+local sLastStatusTick        -- `the milliseconds` of the last coalesced update
+
+-- Handle tables.
+local sStreams               -- keyed by integer stream handle (nested array)
+local sSockToStream          -- keyed by socket id string -> stream handle
+local sServices              -- keyed by integer service handle (nested array)
+local sLocalToService        -- keyed by local port -> service handle
+local sNextHandle            -- monotonic handle allocator (0 is never valid)
 
 -- ==========================================================================
 -- Configuration.
 -- ==========================================================================
 
 command oxSetSocksPort pPort
+   -- Loopback-locked: only the port is settable, never the host (CLAUDE.md
+   -- socket gotcha 6). Take effect on the next oxDial.
    put pPort into sSocksPort
 end oxSetSocksPort
 
@@ -51,30 +130,85 @@ command oxSetControlPort pPort
    put pPort into sControlPort
 end oxSetControlPort
 
+command oxSetControlPassword pPassword
+   -- Only used if the daemon offers HASHEDPASSWORD auth (docs/03 step 2).
+   put pPassword into sControlPassword
+end oxSetControlPassword
+
+command oxSetCallbackOwner pObjectLongId
+   -- The object whose script holds the app callbacks. If unset, callbacks
+   -- dispatch to the topStack (VERIFY: confirm the topStack is the app's stack
+   -- in your setup; setting this explicitly removes the ambiguity).
+   put pObjectLongId into sCallbackOwner
+end oxSetCallbackOwner
+
+command oxSetStatusCallback pHandlerName
+   put pHandlerName into sStatusCallback
+end oxSetStatusCallback
+
+command oxSetPeerCallback pHandlerName
+   put pHandlerName into sPeerCallback
+end oxSetPeerCallback
+
 function oxVersion
-   -- Once the control connection is up, append the tor version from
-   -- GETINFO version (TODO phase 2). For now, just the library version.
-   return kOxVersion
+   -- The library version, plus the tor version once the control connection has
+   -- answered GETINFO version (docs/05).
+   if sControlTorVersion is empty then
+      return kOxVersion
+   end if
+   return kOxVersion & " (tor " & sControlTorVersion & ")"
 end oxVersion
 
 -- ==========================================================================
--- Control connection and bootstrap (docs/03-control-port.md, plan phase 2).
+-- Control connection, authentication, and the command pipeline
+-- (docs/03-control-port.md). The connection is opened and authenticated
+-- asynchronously; the app learns the outcome through the status callback.
 -- ==========================================================================
 
 command oxConnectControl
-   -- TODO(phase 2): open socket to kOxHost & ":" & effectiveControlPort() with
-   -- message, PROTOCOLINFO 1, then authenticate (SAFECOOKIE > COOKIE > NULL >
-   -- HASHEDPASSWORD). Report success/failure in the result.
-   return notImplemented("oxConnectControl")
+   -- Idempotent-ish: refuse a second concurrent connect rather than leak a
+   -- socket. Disconnect first to reconnect.
+   if sControlSocket is not empty then
+      return "OnionXT: control connection already open (oxDisconnectControl first)"
+   end if
+   local tSocketID
+   -- A named connection (|oxctl) so the id is stable and distinct from streams.
+   put kOxHost & ":" & effectiveControlPort() & "|oxctl" into tSocketID
+   put tSocketID into sControlSocket
+   put "connecting" into sControlState
+   put empty into sCtlInFlight
+   put empty into sCtlReplyLines
+   put false into sCtlInData
+   put empty into sCtlQueue
+   -- Bound the connect/handshake so a stalled daemon fails cleanly.
+   set the socketTimeoutInterval to kOxHandshakeTimeout
+   open socket to tSocketID with message oxCtlOpened
+   -- A watchdog independent of the (repeating) socketTimeout: if we are not
+   -- authenticated within the deadline, tear the connection down.
+   send ("oxCtlDeadline " & quote & tSocketID & quote) to me in kOxHandshakeTimeout milliseconds
+   return empty
 end oxConnectControl
 
 command oxDisconnectControl
-   -- TODO(phase 2): idempotent close of the control socket.
+   -- Idempotent close of the control socket and reset of all control state.
+   if sControlSocket is not empty then
+      oxSafeCloseSocket sControlSocket
+   end if
    put empty into sControlSocket
+   put "disconnected" into sControlState
+   put empty into sCtlInFlight
+   put empty into sCtlReplyLines
+   put false into sCtlInData
+   put empty into sCtlQueue
+   put empty into sControlCookieBytes
+   put empty into sControlClientNonce
 end oxDisconnectControl
 
+function oxIsControlAuthenticated
+   return (sControlState is "authenticated")
+end oxIsControlAuthenticated
+
 function oxBootstrapProgress
-   -- TODO(phase 6): driven by STATUS_CLIENT BOOTSTRAP PROGRESS= events.
    if sBootstrap is empty then
       return 0
    end if
@@ -82,100 +216,1293 @@ function oxBootstrapProgress
 end oxBootstrapProgress
 
 function oxIsReady
-   -- TODO(phase 6): true once bootstrapped to 100 and any service descriptor
-   -- has uploaded (HS_DESC). Stubbed false.
-   return false
+   -- Ready to carry traffic once bootstrapped to 100 and the control port is
+   -- authenticated. A published service's own reachability is reported
+   -- separately via the "serviceReady" status (HS_DESC UPLOADED).
+   return (sBootstrap is 100) and (sControlState is "authenticated")
 end oxIsReady
 
-command oxSetStatusCallback pHandlerName
-   put pHandlerName into sStatusCallback
-end oxSetStatusCallback
+private command oxCtlOpened pSocketID
+   -- The control TCP connection is up. Start the single persistent line reader
+   -- and kick the auth dance with PROTOCOLINFO (allowed pre-auth).
+   if pSocketID is not sControlSocket then
+      exit oxCtlOpened          -- a stale socket; ignore
+   end if
+   put "protocolinfo" into sControlState
+   oxStatusUpdate "control", "connected"
+   -- One outstanding CRLF read at a time; re-armed at the end of oxCtlLine.
+   read from socket pSocketID until crlf with message oxCtlLine
+   oxCtlSend "PROTOCOLINFO 1", "protocolinfo"
+end oxCtlOpened
+
+private command oxCtlSend pCommand, pLabel
+   -- Send a control command, or queue it if one is already in flight so replies
+   -- always match commands (docs/03: keep a single in-flight command queue).
+   if sControlSocket is empty then
+      exit oxCtlSend
+   end if
+   if sCtlInFlight is not empty then
+      put pLabel & tab & pCommand & return after sCtlQueue
+      exit oxCtlSend
+   end if
+   put pLabel into sCtlInFlight
+   put empty into sCtlReplyLines
+   put false into sCtlInData
+   put empty into sCtlData
+   -- Commands are ASCII text; textEncode gives the exact wire bytes, then the
+   -- CRLF terminator (docs/03 line framing).
+   write textEncode(pCommand & oxCrlf(), "UTF-8") to socket sControlSocket
+end oxCtlSend
+
+private command oxCtlDrainQueue
+   -- Send the next queued command, if any. Called when a reply completes.
+   if sCtlQueue is empty then
+      exit oxCtlDrainQueue
+   end if
+   local tLine, tLabel, tCommand, tSaved
+   put line 1 of sCtlQueue into tLine
+   delete line 1 of sCtlQueue
+   put the itemDelimiter into tSaved
+   set the itemDelimiter to tab
+   put item 1 of tLine into tLabel
+   put item 2 to -1 of tLine into tCommand
+   set the itemDelimiter to tSaved
+   oxCtlSend tCommand, tLabel
+end oxCtlDrainQueue
+
+private command oxCtlLine pSocketID, pData
+   -- The persistent control-port line reader. Demultiplexes unsolicited 650
+   -- events from command replies, reassembles multi-line replies, and honours
+   -- the 250-/250+/'.'/250 space framing (docs/03).
+   if pSocketID is not sControlSocket then
+      exit oxCtlLine            -- a stale socket; ignore
+   end if
+   local tLine
+   -- Control replies are ASCII; decode as text, then strip the line terminator
+   -- defensively (VERIFY: whether `read until crlf` includes the CRLF).
+   put textDecode(pData, "UTF-8") into tLine
+   oxStripLineEnd tLine
+
+   if sCtlInData then
+      -- Inside a 250+ CmdData block: a lone "." ends it; other lines are data
+      -- with any doubled leading dot un-stuffed (docs/03, RFC 2821 dot-stuffing).
+      if tLine is "." then
+         put false into sCtlInData
+      else
+         if char 1 to 2 of tLine is ".." then
+            delete char 1 of tLine
+         end if
+         put tLine & return after sCtlData
+      end if
+      oxCtlRearm pSocketID
+      exit oxCtlLine
+   end if
+
+   if the length of tLine < 3 then
+      oxCtlRearm pSocketID      -- malformed / empty; skip
+      exit oxCtlLine
+   end if
+
+   local tCode, tSep
+   put char 1 to 3 of tLine into tCode
+   put char 4 of tLine into tSep
+
+   if tCode is "650" then
+      -- An asynchronous event. Route it to the event handler, never to the
+      -- pending-command continuation.
+      oxHandleEvent tLine
+      oxCtlRearm pSocketID
+      exit oxCtlLine
+   end if
+
+   -- A command-reply line. Accumulate it and act on the frame control byte.
+   put tLine & return after sCtlReplyLines
+   if tSep is "+" then
+      put true into sCtlInData
+   else if tSep is space or tSep is empty then
+      -- Space (or a 3-char line) terminates the reply.
+      oxCtlReplyComplete
+      put empty into sCtlInFlight
+      put empty into sCtlReplyLines
+      oxCtlDrainQueue
+   end if
+   -- "-" continuation: just keep reading.
+   oxCtlRearm pSocketID
+end oxCtlLine
+
+private command oxCtlRearm pSocketID
+   -- Keep exactly one read outstanding, but only while the socket is still ours.
+   if pSocketID is sControlSocket then
+      read from socket pSocketID until crlf with message oxCtlLine
+   end if
+end oxCtlRearm
+
+private command oxCtlReplyComplete
+   -- Dispatch the just-completed reply to the continuation for the in-flight
+   -- command. if/else-if, not switch (the static gate rejects `end switch`).
+   local tLabel, tOp, tArg, tSaved
+   put sCtlInFlight into tLabel
+   put the itemDelimiter into tSaved
+   set the itemDelimiter to ":"
+   put item 1 of tLabel into tOp
+   put item 2 to -1 of tLabel into tArg
+   set the itemDelimiter to tSaved
+
+   if tOp is "protocolinfo" then
+      oxParseProtocolInfo sCtlReplyLines
+      oxChooseAuthAndStart
+   else if tOp is "authchallenge" then
+      oxHandleAuthChallenge sCtlReplyLines
+   else if tOp is "authenticate" then
+      oxHandleAuthResult sCtlReplyLines
+   else if tOp is "setevents" then
+      -- 250 OK expected; nothing to do on success.
+   else if tOp is "getinfo-version" then
+      oxParseTorVersion sCtlReplyLines
+   else if tOp is "add_onion" then
+      oxHandleAddOnionReply tArg, sCtlReplyLines
+   else if tOp is "del_onion" then
+      -- 250 OK on success, 552 if unknown; the removal already forgot local
+      -- state, so nothing further is required here.
+   end if
+end oxCtlReplyComplete
+
+private command oxParseProtocolInfo pReply
+   -- Extract the offered auth methods and (for cookie auth) the cookie-file path
+   -- from the PROTOCOLINFO reply (docs/03 step 1).
+   put empty into sControlMethods
+   put empty into sControlCookieFile
+   local tLine
+   repeat for each line tLine in pReply
+      if "AUTH METHODS=" is in tLine then
+         -- METHODS=<comma list> [COOKIEFILE="<quoted, C-escaped path>"]
+         put oxFieldAfter(tLine, "METHODS=") into sControlMethods
+         if "COOKIEFILE=" is in tLine then
+            put oxCUnescape(oxQuotedValueAfter(tLine, "COOKIEFILE=")) into sControlCookieFile
+         end if
+      end if
+   end repeat
+end oxParseProtocolInfo
+
+private command oxChooseAuthAndStart
+   -- Priority SAFECOOKIE > COOKIE > NULL > HASHEDPASSWORD (docs/03), but degrade
+   -- past any method whose prerequisite is missing rather than fail: SAFECOOKIE
+   -- needs SodiumXT HMAC-SHA256 and randomness (docs/08), COOKIE needs the
+   -- readable cookie file, HASHEDPASSWORD needs an app-set password.
+   put "authenticating" into sControlState
+
+   if oxMethodOffered("SAFECOOKIE") and oxSodiumHasHmac() and oxSodiumHasRandom() then
+      if oxLoadCookie() then
+         oxStartSafeCookie
+         exit oxChooseAuthAndStart
+      end if
+   end if
+   if oxMethodOffered("COOKIE") then
+      if oxLoadCookie() then
+         local tHex
+         put oxBytesToHex(sControlCookieBytes) into tHex
+         oxCtlSend "AUTHENTICATE " & tHex, "authenticate"
+         exit oxChooseAuthAndStart
+      end if
+   end if
+   if oxMethodOffered("NULL") then
+      oxCtlSend "AUTHENTICATE", "authenticate"
+      exit oxChooseAuthAndStart
+   end if
+   if oxMethodOffered("HASHEDPASSWORD") and sControlPassword is not empty then
+      -- Quote the password; escape backslash and double-quote (docs/03).
+      oxCtlSend "AUTHENTICATE " & quote & oxQuoteEscape(sControlPassword) & quote, "authenticate"
+      exit oxChooseAuthAndStart
+   end if
+
+   put "failed" into sControlState
+   oxStatusUpdate "control", "authfailed: no usable auth method (offered " & sControlMethods & ")"
+   oxDisconnectControl
+end oxChooseAuthAndStart
+
+private command oxStartSafeCookie
+   -- SAFECOOKIE step A: send a 32-byte client nonce as hex (docs/03 step 2).
+   put oxRandomBytes(32) into sControlClientNonce
+   oxCtlSend "AUTHCHALLENGE SAFECOOKIE " & oxBytesToHex(sControlClientNonce), "authchallenge"
+end oxStartSafeCookie
+
+private command oxHandleAuthChallenge pReply
+   -- SAFECOOKIE step B/C/D. The reply is a SINGLE final line:
+   -- 250 AUTHCHALLENGE SERVERHASH=<hex> SERVERNONCE=<hex> (docs/03; the reply is
+   -- space-separated, not a 250- continuation).
+   local tLine, tServerHashHex, tServerNonceHex
+   put line 1 of pReply into tLine
+   if char 1 to 3 of tLine is not "250" then
+      put "failed" into sControlState
+      oxStatusUpdate "control", "authfailed: AUTHCHALLENGE rejected (" & tLine & ")"
+      oxDisconnectControl
+      exit oxHandleAuthChallenge
+   end if
+   put oxFieldAfter(tLine, "SERVERHASH=") into tServerHashHex
+   put oxFieldAfter(tLine, "SERVERNONCE=") into tServerNonceHex
+
+   local tServerNonce, tMessage, tExpected, tOk
+   put oxHexToBytes(tServerNonceHex) into tServerNonce
+   -- HMAC message = CookieBytes || ClientNonce || ServerNonce (docs/03).
+   put sControlCookieBytes & sControlClientNonce & tServerNonce into tMessage
+   put oxHmac(kOxSafeCookieServerKey, tMessage) into tExpected
+   -- Verify the server hash in constant time; a mismatch means the far end does
+   -- not hold the cookie (not the real Tor), so abort and do NOT authenticate.
+   put oxConstantTimeEqual(tExpected, oxHexToBytes(tServerHashHex)) into tOk
+   if not tOk then
+      put "failed" into sControlState
+      oxStatusUpdate "control", "authfailed: SAFECOOKIE server hash mismatch (not the real Tor?)"
+      oxDisconnectControl
+      exit oxHandleAuthChallenge
+   end if
+   -- Step D: authenticate with the controller-to-server hash.
+   local tClientHash
+   put oxHmac(kOxSafeCookieClientKey, tMessage) into tClientHash
+   oxCtlSend "AUTHENTICATE " & oxBytesToHex(tClientHash), "authenticate"
+end oxHandleAuthChallenge
+
+private command oxHandleAuthResult pReply
+   -- 250 OK => authenticated; anything else (515 bad auth, 514 required) fails
+   -- closed (docs/03; there is no unauthenticated fallback, CLAUDE.md rule 4).
+   local tLine
+   put line 1 of pReply into tLine
+   if char 1 to 3 of tLine is "250" then
+      put "authenticated" into sControlState
+      oxStatusUpdate "control", "authenticated"
+      -- Subscribe to the events we care about and learn the tor version.
+      oxCtlSend "SETEVENTS STATUS_CLIENT HS_DESC CIRC STREAM", "setevents"
+      oxCtlSend "GETINFO version", "getinfo-version"
+   else
+      put "failed" into sControlState
+      oxStatusUpdate "control", "authfailed: " & tLine
+      oxDisconnectControl
+   end if
+end oxHandleAuthResult
+
+private command oxParseTorVersion pReply
+   -- 250-version=<x> then 250 OK (docs/03). Pull the version value.
+   local tLine
+   repeat for each line tLine in pReply
+      if "version=" is in tLine then
+         put oxFieldAfter(tLine, "version=") into sControlTorVersion
+      end if
+   end repeat
+end oxParseTorVersion
+
+private command oxCtlDeadline pSocketID
+   -- Handshake watchdog: if this control socket never reached authenticated,
+   -- tear it down with a clean error (docs/07: a stalled bootstrap must not hang).
+   if pSocketID is not sControlSocket then
+      exit oxCtlDeadline
+   end if
+   if sControlState is not "authenticated" then
+      oxStatusUpdate "control", "error: control authentication timed out"
+      oxDisconnectControl
+   end if
+end oxCtlDeadline
 
 -- ==========================================================================
--- Outbound: dialing through SOCKS5 (docs/02-socks5-client.md, plan phase 1).
+-- Event handling: bootstrap progress and onion-descriptor readiness
+-- (docs/03 step 5). 650 lines are tolerant-parsed; never hard-fail on an
+-- unrecognized token (the control-spec requires controllers to tolerate them).
+-- ==========================================================================
+
+private command oxHandleEvent pLine
+   local tType
+   put word 2 of pLine into tType
+   if tType is "STATUS_CLIENT" then
+      if "BOOTSTRAP" is in pLine then
+         local tProgress
+         put oxFieldAfter(pLine, "PROGRESS=") into tProgress
+         if tProgress is not empty and tProgress is an integer then
+            put tProgress into sBootstrap
+            oxStatusUpdate "bootstrap", tProgress
+            if tProgress is 100 then
+               oxStatusUpdate "ready", empty
+            end if
+         end if
+      end if
+   else if tType is "HS_DESC" then
+      -- Positional: HS_DESC <Action> <HSAddress> ... . Our service is reachable
+      -- once we see UPLOADED for its address (docs/03 step 5).
+      local tAction, tAddress
+      put word 3 of pLine into tAction
+      put word 4 of pLine into tAddress
+      if tAction is "UPLOADED" then
+         oxMarkServiceReady tAddress
+         oxStatusUpdate "serviceReady", tAddress
+      end if
+   else
+      -- CIRC / STREAM and anything else are diagnostic; surface raw for advanced
+      -- apps that opted into an "event" status, otherwise ignored.
+      oxStatusUpdate "event", pLine
+   end if
+end oxHandleEvent
+
+private command oxMarkServiceReady pAddress
+   local tKey, tCore
+   -- The event carries the ServiceID (no ".onion"); match either spelling.
+   put pAddress into tCore
+   if tCore ends with ".onion" then
+      put char 1 to -7 of tCore into tCore
+   end if
+   repeat for each key tKey in sServices
+      if sServices[tKey]["serviceID"] is tCore then
+         put true into sServices[tKey]["ready"]
+      end if
+   end repeat
+end oxMarkServiceReady
+
+private command oxStatusUpdate pKind, pInfo
+   -- Deliver a status update to the app, coalescing the high-frequency bootstrap
+   -- stream to <= ~4 Hz (CLAUDE.md). Terminal/rare kinds are always delivered.
+   if pKind is "bootstrap" and pInfo is not 100 then
+      local tNow
+      put the milliseconds into tNow
+      if sLastStatusTick is not empty and (tNow - sLastStatusTick) < kOxStatusThrottle then
+         exit oxStatusUpdate   -- coalesce: drop this intermediate tick
+      end if
+      put tNow into sLastStatusTick
+   end if
+   oxDispatch sStatusCallback, pKind, pInfo, empty
+end oxStatusUpdate
+
+-- ==========================================================================
+-- Outbound: dialing through SOCKS5 (docs/02-socks5-client.md). A callback-driven
+-- state machine: greet, CONNECT with ATYP=3 (Tor resolves the name; never a
+-- local DNS lookup), parse the reply, hand up a raw byte-stream tunnel.
 -- ==========================================================================
 
 command oxDial pHost, pPort
-   -- TODO(phase 1): SOCKS5 CONNECT with ATYP=3 (domain name) so Tor resolves
-   -- pHost (a .onion or clearnet name) - never resolve it locally (DNS leak).
-   -- Report a stream handle in the result, or a mapped SOCKS REP error.
-   return notImplemented("oxDial")
+   -- Reports a stream handle through `the result` immediately; the SOCKS
+   -- handshake completes asynchronously and the stream's callback receives
+   -- "open" or "error" (CLAUDE.md async model).
+   if pHost is empty then
+      return "OnionXT: oxDial needs a host (a .onion or clearnet name)"
+   end if
+   if pPort is not an integer or pPort < 1 or pPort > 65535 then
+      return "OnionXT: oxDial needs a port in 1..65535"
+   end if
+   local tHandle, tConnName, tSocketID
+   put oxAllocHandle() into tHandle
+   -- A NON-numeric connection name so several streams to 127.0.0.1:9050 get
+   -- distinct socket ids, and so they never collide with the numeric names the
+   -- accept loop assigns (the id separator is a vertical bar, docs LiveCode ref).
+   put "oxs" & tHandle into tConnName
+   put kOxHost & ":" & effectiveSocksPort() & "|" & tConnName into tSocketID
+   put tSocketID into sStreams[tHandle]["socketID"]
+   put "connecting" into sStreams[tHandle]["state"]
+   put pHost into sStreams[tHandle]["host"]
+   put pPort into sStreams[tHandle]["port"]
+   put "dial" into sStreams[tHandle]["kind"]
+   put empty into sStreams[tHandle]["callback"]
+   put tHandle into sSockToStream[tSocketID]
+   set the socketTimeoutInterval to kOxHandshakeTimeout
+   open socket to tSocketID with message oxSocksOpened
+   send ("oxStreamDeadline " & tHandle) to me in kOxHandshakeTimeout milliseconds
+   return tHandle
 end oxDial
 
-command oxWrite pStream, pData
-   -- TODO(phase 1): write pData (already sealed by the app / Riptide via
-   -- SodiumXT) to the tunneled socket for pStream. OnionXT does not encrypt.
-   return notImplemented("oxWrite")
-end oxWrite
-
 command oxSetStreamCallback pStream, pHandlerName
-   -- TODO(phase 1): register the handler the async read loop calls with each
-   -- inbound Data chunk on pStream. The app reassembles its own framing.
-   return notImplemented("oxSetStreamCallback")
+   if sStreams[pStream]["socketID"] is empty then
+      return "OnionXT: unknown stream handle " & pStream
+   end if
+   put pHandlerName into sStreams[pStream]["callback"]
+   return empty
 end oxSetStreamCallback
 
+command oxWrite pStream, pData
+   -- Write app bytes (already sealed by the app / Riptide via SodiumXT) to the
+   -- tunnel. OnionXT does not encrypt (docs/02).
+   if sStreams[pStream]["state"] is not "connected" then
+      return "OnionXT: stream " & pStream & " is not open"
+   end if
+   write pData to socket sStreams[pStream]["socketID"]
+   return empty
+end oxWrite
+
 command oxCloseStream pStream
-   -- TODO(phase 1): idempotent close of the stream socket and forget pStream.
-   return notImplemented("oxCloseStream")
+   -- Idempotent close of the stream socket; forget the handle. A stale handle is
+   -- a clean no-op.
+   if sStreams[pStream]["socketID"] is empty then
+      exit oxCloseStream
+   end if
+   oxSafeCloseSocket sStreams[pStream]["socketID"]
+   delete variable sSockToStream[sStreams[pStream]["socketID"]]
+   delete variable sStreams[pStream]
 end oxCloseStream
 
+function oxStreamState pStream
+   if sStreams[pStream]["socketID"] is empty then
+      return "unknown"
+   end if
+   return sStreams[pStream]["state"]
+end oxStreamState
+
+private command oxSocksOpened pSocketID
+   -- TCP up: send the method-negotiation greeting 05 01 00 (VER=5, 1 method,
+   -- method 00 = no auth) and read the 2-byte method selection (docs/02 step 1).
+   local tHandle
+   put sSockToStream[pSocketID] into tHandle
+   if tHandle is empty then
+      exit oxSocksOpened        -- stale
+   end if
+   put "greeting" into sStreams[tHandle]["state"]
+   write numToByte(5) & numToByte(1) & numToByte(0) to socket pSocketID
+   read from socket pSocketID for 2 with message oxSocksMethod
+end oxSocksOpened
+
+private command oxSocksMethod pSocketID, pData
+   local tHandle
+   put sSockToStream[pSocketID] into tHandle
+   if tHandle is empty then
+      exit oxSocksMethod
+   end if
+   if the number of bytes of pData < 2 then
+      oxStreamFail tHandle, "SOCKS greeting reply truncated"
+      exit oxSocksMethod
+   end if
+   local tVer, tMethod
+   put byteToNum(byte 1 of pData) into tVer
+   put byteToNum(byte 2 of pData) into tMethod
+   if tVer is not 5 then
+      oxStreamFail tHandle, "SOCKS server is not version 5"
+      exit oxSocksMethod
+   end if
+   if tMethod is not 0 then
+      -- 0xFF = no acceptable methods; anything non-zero we do not offer. Fail
+      -- closed; on loopback no auth is needed and its absence is a misconfig to
+      -- surface, not paper over (docs/02).
+      oxStreamFail tHandle, "SOCKS server demands an auth method OnionXT does not offer (0x" & oxByteHex(tMethod) & ")"
+      exit oxSocksMethod
+   end if
+   -- Method OK: send the CONNECT request with ATYP=3 (domain name) so TOR
+   -- resolves pHost. This is the anonymity-critical choice (docs/02 step 2).
+   put "connect" into sStreams[tHandle]["state"]
+   local tHost, tHostBytes, tPort, tRequest
+   put sStreams[tHandle]["host"] into tHost
+   put textEncode(tHost, "UTF-8") into tHostBytes
+   if the number of bytes of tHostBytes > 255 then
+      oxStreamFail tHandle, "SOCKS host name exceeds 255 bytes"
+      exit oxSocksMethod
+   end if
+   put sStreams[tHandle]["port"] into tPort
+   -- 05 01 00 03 <len> <host bytes> <port-hi> <port-lo>. The port is 2 bytes
+   -- big-endian; build it by hand so the wire bytes are self-evident (do not use
+   -- binaryEncode "S", which is host order, docs LiveCode ref).
+   put numToByte(5) & numToByte(1) & numToByte(0) & numToByte(3) into tRequest
+   put numToByte(the number of bytes of tHostBytes) after tRequest
+   put tHostBytes after tRequest
+   put numToByte(tPort div 256) & numToByte(tPort mod 256) after tRequest
+   write tRequest to socket pSocketID
+   -- Read the fixed 4-byte reply head (VER REP RSV ATYP); the BND.ADDR that
+   -- follows is variable and framed by ATYP (docs/02 step 3).
+   put "replyhead" into sStreams[tHandle]["state"]
+   read from socket pSocketID for 4 with message oxSocksReplyHead
+end oxSocksMethod
+
+private command oxSocksReplyHead pSocketID, pData
+   local tHandle
+   put sSockToStream[pSocketID] into tHandle
+   if tHandle is empty then
+      exit oxSocksReplyHead
+   end if
+   if the number of bytes of pData < 4 then
+      oxStreamFail tHandle, "SOCKS reply head truncated"
+      exit oxSocksReplyHead
+   end if
+   local tVer, tRep, tAtyp
+   put byteToNum(byte 1 of pData) into tVer
+   put byteToNum(byte 2 of pData) into tRep
+   put byteToNum(byte 4 of pData) into tAtyp
+   if tRep is not 0 then
+      -- Any non-zero REP is failure. Map it (incl. Tor's onion 0xF0..0xF7) to a
+      -- human message and tear down (docs/02 REP table; CLAUDE.md rule 4).
+      oxStreamFail tHandle, oxSocksRepMessage(tRep)
+      exit oxSocksReplyHead
+   end if
+   put tAtyp into sStreams[tHandle]["atyp"]
+   -- Consume BND.ADDR + 2-byte BND.PORT. Length depends on ATYP: 01 -> 4, 04 ->
+   -- 16, 03 -> one length byte then that many. We do not use BND.ADDR; we just
+   -- frame past it so the socket is left at the start of the tunnel payload.
+   if tAtyp is 1 then
+      put "replyrest" into sStreams[tHandle]["state"]
+      read from socket pSocketID for 6 with message oxSocksReplyDone     -- 4 + 2
+   else if tAtyp is 4 then
+      put "replyrest" into sStreams[tHandle]["state"]
+      read from socket pSocketID for 18 with message oxSocksReplyDone    -- 16 + 2
+   else if tAtyp is 3 then
+      put "replylen" into sStreams[tHandle]["state"]
+      read from socket pSocketID for 1 with message oxSocksReplyLen
+   else
+      oxStreamFail tHandle, "SOCKS reply has an unknown address type (" & tAtyp & ")"
+   end if
+end oxSocksReplyHead
+
+private command oxSocksReplyLen pSocketID, pData
+   -- ATYP=3 domain BND.ADDR: one length byte, then that many, then 2 port bytes.
+   local tHandle
+   put sSockToStream[pSocketID] into tHandle
+   if tHandle is empty then
+      exit oxSocksReplyLen
+   end if
+   if the number of bytes of pData < 1 then
+      oxStreamFail tHandle, "SOCKS reply address length truncated"
+      exit oxSocksReplyLen
+   end if
+   local tLen
+   put byteToNum(byte 1 of pData) + 2 into tLen     -- address bytes + 2 port bytes
+   put "replyrest" into sStreams[tHandle]["state"]
+   read from socket pSocketID for tLen with message oxSocksReplyDone
+end oxSocksReplyLen
+
+private command oxSocksReplyDone pSocketID, pData
+   -- The SOCKS reply is fully consumed and REP was 0: the socket is now a
+   -- transparent tunnel. Hand it up and start the streaming inbound reader.
+   local tHandle
+   put sSockToStream[pSocketID] into tHandle
+   if tHandle is empty then
+      exit oxSocksReplyDone
+   end if
+   put "connected" into sStreams[tHandle]["state"]
+   oxInvokeStreamCallback tHandle, "open", empty
+   -- Begin the persistent read; each inbound chunk is delivered as "data".
+   -- VERIFY: the no-quantifier `read ... with message` streams available bytes;
+   -- if the engine instead blocks until EOF, switch to a bounded `for N` loop
+   -- driven by socketClosed for the tail.
+   read from socket pSocketID with message oxStreamData
+end oxSocksReplyDone
+
+private command oxStreamData pSocketID, pData
+   -- Inbound bytes on a live stream (dialed OR inbound-accepted; both are unified
+   -- through the stream tables). Deliver the chunk and re-arm the read.
+   local tHandle
+   put sSockToStream[pSocketID] into tHandle
+   if tHandle is empty then
+      exit oxStreamData          -- stale / already torn down
+   end if
+   if the number of bytes of pData > 0 then
+      oxInvokeStreamCallback tHandle, "data", pData
+   end if
+   -- Re-arm only if the stream is still live (the callback may have closed it).
+   if sSockToStream[pSocketID] is not empty then
+      read from socket pSocketID with message oxStreamData
+   end if
+end oxStreamData
+
+private command oxStreamDeadline pStream
+   -- Handshake watchdog for a dialed stream: if it never reached "connected",
+   -- tear it down (docs/02: a silent stall is the worst failure).
+   if sStreams[pStream]["socketID"] is empty then
+      exit oxStreamDeadline
+   end if
+   local tState
+   put sStreams[pStream]["state"] into tState
+   if tState is not "connected" and tState is not "closed" then
+      oxStreamFail pStream, "SOCKS handshake timed out"
+   end if
+end oxStreamDeadline
+
+private command oxStreamFail pStream, pError
+   -- Fail closed: report the error to the app, then close and forget the stream.
+   if sStreams[pStream]["socketID"] is empty then
+      exit oxStreamFail
+   end if
+   put "failed" into sStreams[pStream]["state"]
+   oxInvokeStreamCallback pStream, "error", pError
+   oxSafeCloseSocket sStreams[pStream]["socketID"]
+   delete variable sSockToStream[sStreams[pStream]["socketID"]]
+   delete variable sStreams[pStream]
+end oxStreamFail
+
+private function oxSocksRepMessage pRep
+   -- Map a SOCKS REP code to a clear message. Standard RFC 1928 0x00..0x08 plus
+   -- Tor's onion extensions 0xF0..0xF7 (docs/02; the extended band only appears
+   -- when the SocksPort has ExtendedErrors set, so 0x01/0x04 must map sensibly
+   -- too, since without that flag Tor collapses onion failures onto them).
+   if pRep is 1 then
+      return "general SOCKS server failure"
+   else if pRep is 2 then
+      return "connection not allowed by ruleset"
+   else if pRep is 3 then
+      return "network unreachable"
+   else if pRep is 4 then
+      return "host unreachable"
+   else if pRep is 5 then
+      return "connection refused"
+   else if pRep is 6 then
+      return "TTL expired"
+   else if pRep is 7 then
+      return "command not supported"
+   else if pRep is 8 then
+      return "address type not supported"
+   else if pRep is 240 then
+      return "onion service not found (wrong or offline .onion address)"
+   else if pRep is 241 then
+      return "onion service descriptor is invalid"
+   else if pRep is 242 then
+      return "onion service introduction failed"
+   else if pRep is 243 then
+      return "onion service rendezvous failed"
+   else if pRep is 244 then
+      return "onion service missing client authorization"
+   else if pRep is 245 then
+      return "onion service wrong client authorization"
+   else if pRep is 246 then
+      return "onion service invalid address (malformed .onion)"
+   else if pRep is 247 then
+      return "onion service introduction timed out"
+   end if
+   return "SOCKS request failed (REP 0x" & oxByteHex(pRep) & ")"
+end oxSocksRepMessage
+
 -- ==========================================================================
--- Inbound: onion services (docs/03, docs/04, plan phases 3 and 5).
+-- Inbound: onion services (docs/03 step 3-4, docs/04). Listen on loopback
+-- FIRST, then ADD_ONION, so a peer that connects the moment the descriptor
+-- publishes is answered (CLAUDE.md socket gotcha 5).
 -- ==========================================================================
 
 command oxCreateService pVirtualPort, pLocalPort
-   -- TODO(phase 3): start accepting on 127.0.0.1:pLocalPort FIRST, then
-   -- ADD_ONION NEW:ED25519-V3 Port=pVirtualPort,127.0.0.1:pLocalPort. Report
-   -- the full <56>.onion address and a service handle.
-   return notImplemented("oxCreateService")
+   -- Ephemeral service, Tor generates the key. Reports a service handle through
+   -- `the result`; the .onion address arrives asynchronously (status "service"
+   -- and oxServiceAddress) once ADD_ONION replies.
+   local tError
+   put oxCheckServiceArgs(pVirtualPort, pLocalPort) into tError
+   if tError is not empty then
+      return tError
+   end if
+   local tHandle
+   put oxStartService(pVirtualPort, pLocalPort) into tHandle
+   oxCtlSend "ADD_ONION NEW:ED25519-V3 Port=" & pVirtualPort & ",127.0.0.1:" & pLocalPort, "add_onion:" & tHandle
+   return tHandle
 end oxCreateService
 
 command oxCreateServiceFromSeed pSeed, pVirtualPort, pLocalPort
-   -- TODO(phase 5): derive the ed25519 identity from pSeed via SodiumXT
-   -- (sxSignKeypairFromSeed), expand it to Tor's 64-byte ED25519-V3 form
-   -- (needs the SodiumXT SHA-512 / expansion helper, docs/08), and pass it to
-   -- ADD_ONION ED25519-V3:<key> so the .onion address is reproducible.
-   return notImplemented("oxCreateServiceFromSeed")
+   -- Deterministic, reproducible address: derive the ed25519 identity from
+   -- pSeed via SodiumXT and pass Tor the 64-byte ED25519-V3 expanded key (docs/04).
+   -- The expansion is a SodiumXT capability (docs/08); we compose it and fail
+   -- with a clear message if it is absent, never hand-roll SHA-512.
+   local tError
+   put oxCheckServiceArgs(pVirtualPort, pLocalPort) into tError
+   if tError is not empty then
+      return tError
+   end if
+   if the number of bytes of pSeed is not 32 then
+      return "OnionXT: oxCreateServiceFromSeed needs a 32-byte seed"
+   end if
+   local tExpanded
+   put oxExpandedKeyFromSeed(pSeed) into tExpanded
+   if the number of bytes of tExpanded is not 64 then
+      return tExpanded          -- a capability error, surfaced verbatim
+   end if
+   -- Tor wants standard base64 (with padding); strip any whitespace the encoder
+   -- may insert (docs/04 base64 note).
+   local tBlob
+   put oxStripWhitespace(base64Encode(tExpanded)) into tBlob
+   local tHandle
+   put oxStartService(pVirtualPort, pLocalPort) into tHandle
+   oxCtlSend "ADD_ONION ED25519-V3:" & tBlob & " Port=" & pVirtualPort & ",127.0.0.1:" & pLocalPort, "add_onion:" & tHandle
+   return tHandle
 end oxCreateServiceFromSeed
 
+private function oxCheckServiceArgs pVirtualPort, pLocalPort
+   if sControlState is not "authenticated" then
+      return "OnionXT: connect and authenticate the control port first (oxConnectControl)"
+   end if
+   if pVirtualPort is not an integer or pVirtualPort < 1 or pVirtualPort > 65535 then
+      return "OnionXT: virtual port must be 1..65535"
+   end if
+   if pLocalPort is not an integer or pLocalPort < 1 or pLocalPort > 65535 then
+      return "OnionXT: local port must be 1..65535"
+   end if
+   return empty
+end oxCheckServiceArgs
+
+private function oxStartService pVirtualPort, pLocalPort
+   -- Allocate the handle and START the loopback listener before ADD_ONION so a
+   -- forwarded connection is never refused (docs/03 step 4, ordering gotcha).
+   local tHandle
+   put oxAllocHandle() into tHandle
+   put pVirtualPort into sServices[tHandle]["virtualPort"]
+   put pLocalPort into sServices[tHandle]["localPort"]
+   put empty into sServices[tHandle]["serviceID"]
+   put empty into sServices[tHandle]["address"]
+   put empty into sServices[tHandle]["privateKey"]
+   put false into sServices[tHandle]["ready"]
+   if sLocalToService[pLocalPort] is empty then
+      -- Bind loopback only. VERIFY: the classic `accept connections on port`
+      -- has no bind-address argument and may listen on 0.0.0.0; oxPeerAccepted
+      -- enforces loopback by rejecting any non-127.0.0.1 peer before reading.
+      accept connections on pLocalPort with message oxPeerAccepted
+      put true into sServices[tHandle]["listening"]
+   end if
+   put tHandle into sLocalToService[pLocalPort]
+   return tHandle
+end oxStartService
+
+private command oxHandleAddOnionReply pHandle, pReply
+   -- Parse ServiceID (and PrivateKey unless discarded) from the ADD_ONION reply
+   -- (docs/03 step 3). On failure, fail closed and tear the half-built service.
+   local tLine
+   if char 1 to 3 of (line 1 of pReply) is not "250" and "ServiceID=" is not in pReply then
+      oxRemoveService pHandle
+      oxStatusUpdate "control", "error: ADD_ONION failed (" & (line 1 of pReply) & ")"
+      exit oxHandleAddOnionReply
+   end if
+   repeat for each line tLine in pReply
+      if "ServiceID=" is in tLine then
+         put oxFieldAfter(tLine, "ServiceID=") into sServices[pHandle]["serviceID"]
+      else if "PrivateKey=" is in tLine then
+         put oxFieldAfter(tLine, "PrivateKey=") into sServices[pHandle]["privateKey"]
+      end if
+   end repeat
+   if sServices[pHandle]["serviceID"] is not empty then
+      put sServices[pHandle]["serviceID"] & ".onion" into sServices[pHandle]["address"]
+      oxStatusUpdate "service", sServices[pHandle]["address"]
+   end if
+end oxHandleAddOnionReply
+
 command oxRemoveService pService
-   -- TODO(phase 3): DEL_ONION and stop the listener. Idempotent.
-   return notImplemented("oxRemoveService")
+   -- DEL_ONION and stop the listener. Idempotent: a stale handle is a no-op.
+   if sServices[pService]["localPort"] is empty then
+      exit oxRemoveService
+   end if
+   local tServiceID, tLocalPort
+   put sServices[pService]["serviceID"] into tServiceID
+   put sServices[pService]["localPort"] into tLocalPort
+   if tServiceID is not empty and sControlState is "authenticated" then
+      oxCtlSend "DEL_ONION " & tServiceID, "del_onion:" & pService
+   end if
+   -- Stop accepting on the loopback port (one service per local port here).
+   if sLocalToService[tLocalPort] is pService then
+      oxSafeCloseSocket tLocalPort
+      delete variable sLocalToService[tLocalPort]
+   end if
+   delete variable sServices[pService]
 end oxRemoveService
 
 function oxServiceAddress pService
-   -- TODO(phase 3): the .onion address for a published service handle.
-   return empty
+   return sServices[pService]["address"]
 end oxServiceAddress
 
-command oxSetPeerCallback pHandlerName
-   put pHandlerName into sPeerCallback
-end oxSetPeerCallback
+function oxServiceIsReady pService
+   return (sServices[pService]["ready"] is true)
+end oxServiceIsReady
+
+private command oxPeerAccepted pSocketID
+   -- Tor forwarded an inbound onion connection to our loopback listener. Enforce
+   -- loopback (security-critical: reject any non-127.0.0.1 peer before reading a
+   -- byte), wrap the accepted socket as an inbound stream, and hand it to the app.
+   local tPeerHost
+   put oxHostOfSocket(pSocketID) into tPeerHost
+   if tPeerHost is not kOxHost then
+      -- Not a Tor-forwarded loopback connection: refuse it (docs LiveCode ref;
+      -- the listener may be bound to all interfaces).
+      oxSafeCloseSocket pSocketID
+      exit oxPeerAccepted
+   end if
+   local tHandle
+   put oxAllocHandle() into tHandle
+   put pSocketID into sStreams[tHandle]["socketID"]
+   put "connected" into sStreams[tHandle]["state"]
+   put "inbound" into sStreams[tHandle]["kind"]
+   put empty into sStreams[tHandle]["callback"]
+   put tHandle into sSockToStream[pSocketID]
+   -- Hand the stream to the app FIRST so it can register a stream callback (the
+   -- dispatch is synchronous), THEN arm the read so no inbound chunk is delivered
+   -- before there is a callback to receive it.
+   oxDispatch sPeerCallback, tHandle, oxGuessService(pSocketID), tPeerHost
+   if sSockToStream[pSocketID] is not empty then
+      read from socket pSocketID with message oxStreamData
+   end if
+end oxPeerAccepted
+
+private function oxGuessService pSocketID
+   -- Best-effort service association for the peer callback. The accept callback
+   -- carries the PEER address, not our local port, so we cannot always know which
+   -- service was reached (VERIFY the accepted-socket id format on-engine). If a
+   -- single service is live, return it; otherwise return empty and let the app
+   -- key on distinct local ports.
+   local tKeys, tCount, tKey
+   put the keys of sServices into tKeys
+   put the number of lines of tKeys into tCount
+   if tCount is 1 then
+      return line 1 of tKeys
+   end if
+   return empty
+end oxGuessService
 
 -- ==========================================================================
 -- Address helpers: a v3 .onion address IS an ed25519 public key
--- (docs/04-onion-rendezvous.md). Pure, no network.
+-- (docs/04-onion-rendezvous.md). base32 and the layout are pure byte work; only
+-- the checksum needs SHA3-256, which is composed from SodiumXT (docs/08).
 -- ==========================================================================
-
-function oxAddressFromPublicKey pEd25519Pub
-   -- TODO(phase 5): base32( pubkey || checksum || 0x03 ) & ".onion". The
-   -- checksum needs SHA3-256 (SodiumXT gap, docs/08); base32 is pure bytes.
-   return notImplemented("oxAddressFromPublicKey")
-end oxAddressFromPublicKey
 
 function oxPublicKeyFromAddress pOnionAddress
-   -- TODO(phase 5): strip ".onion", base32-decode the 56 chars to 35 bytes,
-   -- return the first 32 (the ed25519 public key). No crypto needed.
-   return notImplemented("oxPublicKeyFromAddress")
+   -- Strip ".onion", base32-decode 56 chars -> 35 bytes, return the first 32 (the
+   -- ed25519 public key). No crypto needed. Empty on a structural error.
+   local tCore, tRaw
+   put oxNormalizeAddress(pOnionAddress) into tCore
+   if the number of chars of tCore is not 56 then
+      return empty
+   end if
+   put oxBase32Decode(tCore) into tRaw
+   if the number of bytes of tRaw is not 35 then
+      return empty
+   end if
+   if byteToNum(byte 35 of tRaw) is not 3 then
+      return empty            -- not a version-3 address
+   end if
+   return byte 1 to 32 of tRaw
 end oxPublicKeyFromAddress
 
+function oxAddressFromPublicKey pEd25519Pub
+   -- base32( pubkey || checksum || 0x03 ) & ".onion" (docs/04). The checksum is
+   -- SHA3-256(".onion checksum" || pubkey || 0x03)[:2], composed from SodiumXT;
+   -- absent that primitive, return a clear error rather than a wrong address.
+   if the number of bytes of pEd25519Pub is not 32 then
+      return "OnionXT: oxAddressFromPublicKey needs a 32-byte ed25519 public key"
+   end if
+   local tChecksum
+   put oxOnionChecksum(pEd25519Pub) into tChecksum
+   if the number of bytes of tChecksum is not 2 then
+      return tChecksum         -- capability error, surfaced verbatim
+   end if
+   return oxBase32Encode(pEd25519Pub & tChecksum & numToByte(3)) & ".onion"
+end oxAddressFromPublicKey
+
 function oxIsValidAddress pOnionAddress
-   -- TODO(phase 5): structural check now; checksum check once SHA3-256 lands.
-   return false
+   -- Structural checks always (length, alphabet, version byte); checksum
+   -- verification too when SodiumXT SHA3-256 is available (docs/04, docs/08).
+   local tCore, tRaw
+   put oxNormalizeAddress(pOnionAddress) into tCore
+   if the number of chars of tCore is not 56 then
+      return false
+   end if
+   local tI, tCh
+   repeat with tI = 1 to 56
+      put char tI of tCore into tCh
+      if offset(tCh, kOxBase32Alphabet) is 0 then
+         return false
+      end if
+   end repeat
+   put oxBase32Decode(tCore) into tRaw
+   if the number of bytes of tRaw is not 35 then
+      return false
+   end if
+   if byteToNum(byte 35 of tRaw) is not 3 then
+      return false
+   end if
+   -- Checksum verification when we can compute it; otherwise structural-only
+   -- (the real authentication is Tor's connect-time descriptor-signature check).
+   local tChecksum
+   put oxOnionChecksum(byte 1 to 32 of tRaw) into tChecksum
+   if the number of bytes of tChecksum is not 2 then
+      return true             -- no SHA3-256 available; accept the structure
+   end if
+   return oxConstantTimeEqual(tChecksum, byte 33 to 34 of tRaw)
 end oxIsValidAddress
 
+private function oxNormalizeAddress pOnionAddress
+   -- Trim, lowercase, and strip a trailing ".onion".
+   local tCore
+   put oxTrim(pOnionAddress) into tCore
+   put toLower(tCore) into tCore
+   if tCore ends with ".onion" then
+      put char 1 to -7 of tCore into tCore
+   end if
+   return tCore
+end oxNormalizeAddress
+
+private function oxBase32Encode pData
+   -- RFC 4648 base32, lowercase, no padding. Pure bit-packing: accumulate input
+   -- bytes MSB-first into a small buffer and emit 5-bit groups. The buffer is
+   -- masked to its pending bits each iteration so it never grows past ~13 bits
+   -- (staying in exact-integer range; a 280-bit accumulator would lose precision).
+   local tOut, tBits, tValue, tI, tN, tIndex
+   put "" into tOut
+   put 0 into tBits
+   put 0 into tValue
+   put the number of bytes of pData into tN
+   repeat with tI = 1 to tN
+      put tValue * 256 + byteToNum(byte tI of pData) into tValue
+      add 8 to tBits
+      repeat while tBits >= 5
+         subtract 5 from tBits
+         put (tValue div (2 ^ tBits)) mod 32 into tIndex
+         put char (tIndex + 1) of kOxBase32Alphabet after tOut
+      end repeat
+      put tValue mod (2 ^ tBits) into tValue        -- keep only the pending bits
+   end repeat
+   if tBits > 0 then
+      -- Left-align the final partial group and emit it (canonical no-pad tail).
+      put (tValue * (2 ^ (5 - tBits))) mod 32 into tIndex
+      put char (tIndex + 1) of kOxBase32Alphabet after tOut
+   end if
+   return tOut
+end oxBase32Encode
+
+private function oxBase32Decode pText
+   -- Inverse of oxBase32Encode. Accumulate 5 bits per input char and emit a byte
+   -- whenever 8 bits are available; leftover (< 5) bits of the final group are
+   -- discarded (canonical). Returns empty on any character outside the alphabet.
+   local tOut, tBits, tValue, tI, tN, tCh, tIndex, tByteOut
+   put "" into tOut
+   put 0 into tBits
+   put 0 into tValue
+   put the number of chars of pText into tN
+   repeat with tI = 1 to tN
+      put char tI of pText into tCh
+      put offset(tCh, kOxBase32Alphabet) into tIndex     -- 1..32, or 0 if absent
+      if tIndex is 0 then
+         return empty
+      end if
+      put tValue * 32 + (tIndex - 1) into tValue
+      add 5 to tBits
+      if tBits >= 8 then
+         subtract 8 from tBits
+         put (tValue div (2 ^ tBits)) mod 256 into tByteOut
+         put numToByte(tByteOut) after tOut
+         put tValue mod (2 ^ tBits) into tValue
+      end if
+   end repeat
+   return tOut
+end oxBase32Decode
+
+private function oxOnionChecksum pEd25519Pub
+   -- SHA3-256(".onion checksum" || pubkey || 0x03)[:2] (docs/04). H = SHA3-256 is
+   -- a SodiumXT primitive (docs/08); compose it and report a capability error if
+   -- it is absent, never hand-roll a hash (CLAUDE.md rule 1).
+   local tPreimage, tHash
+   put textEncode(kOxChecksumPrefix, "UTF-8") & pEd25519Pub & numToByte(3) into tPreimage
+   put oxSha3_256(tPreimage) into tHash
+   -- A valid SHA3-256 is exactly 32 bytes; any other length is the capability
+   -- error string from oxSha3_256, surfaced verbatim (robust against comparing a
+   -- string prefix against binary data).
+   if the number of bytes of tHash is not 32 then
+      return tHash
+   end if
+   return byte 1 to 2 of tHash
+end oxOnionChecksum
+
+private function oxExpandedKeyFromSeed pSeed
+   -- The 64-byte Tor ED25519-V3 expanded secret key (docs/04): prefer a dedicated
+   -- SodiumXT helper; else SHA-512(seed) with the scalar clamp done in script
+   -- (byte masking, not crypto). Returns the 64 bytes, or an "OnionXT:" error.
+   local tExpanded
+   put oxTrySodium("sxSignSeedToExpandedKey", pSeed) into tExpanded
+   if tExpanded is not "OXT_NO_HANDLER" then
+      return tExpanded          -- SodiumXT produced the 64 bytes directly
+   end if
+   local tHash
+   put oxTrySodium("sxSha512", pSeed) into tHash
+   if tHash is "OXT_NO_HANDLER" then
+      return "OnionXT: oxCreateServiceFromSeed needs SodiumXT sxSignSeedToExpandedKey or sxSha512 (see docs/08)"
+   end if
+   if the number of bytes of tHash is not 64 then
+      return "OnionXT: sxSha512 returned " & the number of bytes of tHash & " bytes, expected 64"
+   end if
+   -- Clamp the scalar a = h[0:32]: a[0] &= 0xF8, a[31] &= 0x7F, a[31] |= 0x40;
+   -- RH = h[32:64]; expanded = a || RH (docs/04). Byte masking only.
+   local tByte1, tByte32
+   put bitAnd(byteToNum(byte 1 of tHash), 248) into tByte1
+   put bitAnd(byteToNum(byte 32 of tHash), 127) into tByte32
+   put bitOr(tByte32, 64) into tByte32
+   return numToByte(tByte1) & (byte 2 to 31 of tHash) & numToByte(tByte32) & (byte 33 to 64 of tHash)
+end oxExpandedKeyFromSeed
+
 -- ==========================================================================
--- Internal helpers.
+-- Riptide transport seam (docs/06). Thin wrappers so Riptide (or any app) can
+-- treat OnionXT as its `ox` transport: dial by rendezvous address, listen at a
+-- seed-derived address, send/recv bytes. OnionXT stays a transport: no crypto,
+-- no framing opinion; the payload is sealed by the app / Riptide via SodiumXT.
+-- ==========================================================================
+
+function oxTransportInfo
+   -- Advertise the transport and which optional SodiumXT-backed capabilities are
+   -- available, so a Riptide channel can negotiate ox vs bt and fall back visibly
+   -- rather than silently (docs/06). Returns a LiveCode array.
+   local tInfo
+   put "ox" into tInfo["transport"]
+   put kOxVersion into tInfo["version"]
+   put (oxSodiumHasHmac() and oxSodiumHasRandom()) into tInfo["safeCookieAuth"]
+   put oxSodiumHasExpansion() into tInfo["deterministicOnion"]
+   put oxSodiumHasSha3() into tInfo["offlineAddress"]
+   return tInfo
+end oxTransportInfo
+
+command oxTransportDial pAddress, pPort
+   -- Dial a rendezvous address. Accepts a full <56>.onion, or a 32-byte ed25519
+   -- public key / 64-hex string, which it maps to an address first (docs/06).
+   local tPort, tHost
+   if pPort is empty then
+      put 80 into tPort
+   else
+      put pPort into tPort
+   end if
+   put pAddress into tHost
+   if tHost does not end with ".onion" then
+      local tPub
+      if the number of chars of tHost is 64 then
+         put oxHexToBytes(tHost) into tPub
+      else
+         put tHost into tPub
+      end if
+      if the number of bytes of tPub is 32 then
+         put oxAddressFromPublicKey(tPub) into tHost
+         if tHost begins with "OnionXT:" then
+            return tHost
+         end if
+      end if
+   end if
+   oxDial tHost, tPort
+   return the result
+end oxTransportDial
+
+command oxTransportListen pSeed, pVirtualPort, pLocalPort
+   -- Publish a reproducible rendezvous point from a seed (docs/06).
+   oxCreateServiceFromSeed pSeed, pVirtualPort, pLocalPort
+   return the result
+end oxTransportListen
+
+command oxTransportSend pStream, pData
+   oxWrite pStream, pData
+   return the result
+end oxTransportSend
+
+command oxTransportRecv pStream, pHandlerName
+   -- Register where inbound bytes are delivered (the stream callback).
+   oxSetStreamCallback pStream, pHandlerName
+   return the result
+end oxTransportRecv
+
+-- ==========================================================================
+-- Lifecycle and teardown. Central socket-message handlers and a master
+-- oxShutdown so an app can free everything it opened, e.g. on closeStack (there
+-- is no deterministic unload hook in OXT; CLAUDE.md handles-and-state).
+-- ==========================================================================
+
+command oxShutdown
+   -- Idempotent: close every stream, remove every service, disconnect control.
+   -- Safe to call twice.
+   local tKey, tKeys
+   put the keys of sStreams into tKeys
+   repeat for each line tKey in tKeys
+      oxCloseStream tKey
+   end repeat
+   put the keys of sServices into tKeys
+   repeat for each line tKey in tKeys
+      oxRemoveService tKey
+   end repeat
+   oxDisconnectControl
+end oxShutdown
+
+on socketError pSocketID, pError
+   -- The engine's socket-failure message. If the socket closes because of an
+   -- error, this arrives instead of socketClosed. Look up the owner and fail
+   -- closed (docs LiveCode ref). A message for an unknown id is a clean no-op.
+   local tHandle
+   put sSockToStream[pSocketID] into tHandle
+   if tHandle is not empty then
+      oxStreamFail tHandle, "socket error: " & pError
+      exit socketError
+   end if
+   if pSocketID is sControlSocket then
+      oxStatusUpdate "control", "error: " & pError
+      oxDisconnectControl
+   end if
+end socketError
+
+on socketClosed pSocketID
+   -- The remote side closed cleanly. Deliver "closed" to a stream's app callback
+   -- and forget it; for the control socket, mark disconnected.
+   local tHandle
+   put sSockToStream[pSocketID] into tHandle
+   if tHandle is not empty then
+      oxInvokeStreamCallback tHandle, "closed", empty
+      delete variable sSockToStream[pSocketID]
+      delete variable sStreams[tHandle]
+      exit socketClosed
+   end if
+   if pSocketID is sControlSocket then
+      oxStatusUpdate "control", "disconnected"
+      oxDisconnectControl
+   end if
+end socketClosed
+
+on socketTimeout pSocketID
+   -- socketTimeout REPEATS every interval while a read/write is pending (docs
+   -- LiveCode ref), so it is only fatal during a handshake; on a connected stream
+   -- it is just an idle read and must be ignored. Tear down only handshakes.
+   local tHandle, tState
+   put sSockToStream[pSocketID] into tHandle
+   if tHandle is not empty then
+      put sStreams[tHandle]["state"] into tState
+      if tState is not "connected" then
+         oxStreamFail tHandle, "SOCKS handshake timed out"
+      end if
+      exit socketTimeout
+   end if
+   -- Control socket: only fatal before authentication completes.
+   if pSocketID is sControlSocket and sControlState is not "authenticated" then
+      oxStatusUpdate "control", "error: control handshake timed out"
+      oxDisconnectControl
+   end if
+end socketTimeout
+
+-- ==========================================================================
+-- Optional Mode B: launch and supervise a bundled tor (docs/07). This is a
+-- CONVENIENCE layer, NOT the default and NOT the tested path; the assume-running
+-- daemon (Mode A) is the trusted, recommended base. VERIFY every step on-engine.
+-- ==========================================================================
+
+command oxLaunchTor pTorPath, pDataDir, pSocksPort, pControlPort
+   -- Write a minimal torrc into pDataDir and launch pTorPath against it, so tor
+   -- exits with the app (__OwningControllerProcess) and uses cookie auth. Returns
+   -- empty on a clean launch attempt, or an error string. The caller then polls
+   -- oxConnectControl / oxBootstrapProgress; this does not wait for bootstrap.
+   if pTorPath is empty or pDataDir is empty then
+      return "OnionXT: oxLaunchTor needs a tor binary path and a data directory"
+   end if
+   local tSocks, tControl, tTorrc, tRcPath
+   if pSocksPort is empty then
+      put kOxSocksPortDefault into tSocks
+   else
+      put pSocksPort into tSocks
+   end if
+   if pControlPort is empty then
+      put kOxControlPortDefault into tControl
+   else
+      put pControlPort into tControl
+   end if
+   put "SocksPort " & tSocks & oxCrlf() after tTorrc
+   put "ControlPort " & tControl & oxCrlf() after tTorrc
+   put "CookieAuthentication 1" & oxCrlf() after tTorrc
+   put "DataDirectory " & pDataDir & oxCrlf() after tTorrc
+   -- Tie tor's lifetime to this process where the platform supports it.
+   put "__OwningControllerProcess " & oxProcessId() & oxCrlf() after tTorrc
+   put pDataDir & "/onionxt-torrc" into tRcPath
+   put tTorrc into url ("binfile:" & tRcPath)
+   oxSetSocksPort tSocks
+   oxSetControlPort tControl
+   -- open process is platform-specific; launch tor detached with -f <torrc>.
+   -- VERIFY: process launch and teardown on your target OXT build.
+   open process (pTorPath & " -f " & tRcPath) for read
+   return empty
+end oxLaunchTor
+
+command oxStopTor
+   -- Ask tor to shut down over the control port, then disconnect. If Mode B was
+   -- not used this simply disconnects control (idempotent).
+   if sControlState is "authenticated" then
+      oxCtlSend "SIGNAL SHUTDOWN", "signal"
+   end if
+   oxDisconnectControl
+end oxStopTor
+
+-- ==========================================================================
+-- SodiumXT composition helpers. Every sx* call is wrapped so a MISSING primitive
+-- degrades to a clear capability error rather than crashing (CLAUDE.md rule 1;
+-- calling an undefined handler raises a catchable error). base32 and the scalar
+-- clamp above are pure byte ops and are NOT routed through here.
+-- ==========================================================================
+
+private function oxSha3_256 pData
+   local tOut
+   put oxTrySodium("sxSha3_256", pData) into tOut
+   if tOut is "OXT_NO_HANDLER" then
+      return "OnionXT: this operation needs SodiumXT SHA3-256 (sxSha3_256, see docs/08)"
+   end if
+   return tOut
+end oxSha3_256
+
+private function oxHmac pKeyString, pMessage
+   -- HMAC-SHA256 with an ASCII key string; the key crosses as UTF-8 bytes.
+   local tOut
+   put oxTrySodium2("sxHmacSha256", textEncode(pKeyString, "UTF-8"), pMessage) into tOut
+   if tOut is "OXT_NO_HANDLER" then
+      return "OnionXT: SAFECOOKIE auth needs SodiumXT HMAC-SHA256 (sxHmacSha256, see docs/08)"
+   end if
+   return tOut
+end oxHmac
+
+private function oxRandomBytes pCount
+   local tOut
+   put oxTrySodium("sxRandomBytes", pCount) into tOut
+   if tOut is "OXT_NO_HANDLER" then
+      -- Should not be reached: SAFECOOKIE is only chosen when randomness exists.
+      return empty
+   end if
+   return tOut
+end oxRandomBytes
+
+private function oxConstantTimeEqual pA, pB
+   -- Prefer SodiumXT's constant-time compare; fall back to a plain compare only
+   -- when it is unavailable (acceptable on a loopback control port).
+   local tOut
+   put oxTrySodium2("sxMemEqual", pA, pB) into tOut
+   if tOut is not "OXT_NO_HANDLER" then
+      return (tOut is true)
+   end if
+   return (pA is pB)
+end oxConstantTimeEqual
+
+private function oxTrySodium pFuncName, pArg
+   -- Call a one-argument SodiumXT function; return "OXT_NO_HANDLER" if it does
+   -- not exist, so callers can degrade. `dispatch function` reports absence
+   -- through `it` = "unhandled" without throwing (docs LiveCode ref).
+   local tResult
+   dispatch function pFuncName to oxCallbackTarget() with pArg
+   if it is "unhandled" then
+      return "OXT_NO_HANDLER"
+   end if
+   return the result
+end oxTrySodium
+
+private function oxTrySodium2 pFuncName, pArg1, pArg2
+   dispatch function pFuncName to oxCallbackTarget() with pArg1, pArg2
+   if it is "unhandled" then
+      return "OXT_NO_HANDLER"
+   end if
+   return the result
+end oxTrySodium2
+
+private function oxSodiumHasHmac
+   return (oxTrySodium2("sxHmacSha256", empty, empty) is not "OXT_NO_HANDLER")
+end oxSodiumHasHmac
+
+private function oxSodiumHasRandom
+   return (oxTrySodium("sxRandomBytes", 1) is not "OXT_NO_HANDLER")
+end oxSodiumHasRandom
+
+private function oxSodiumHasSha3
+   return (oxTrySodium("sxSha3_256", empty) is not "OXT_NO_HANDLER")
+end oxSodiumHasSha3
+
+private function oxSodiumHasExpansion
+   if oxTrySodium("sxSignSeedToExpandedKey", oxZeroBytes(32)) is not "OXT_NO_HANDLER" then
+      return true
+   end if
+   return (oxTrySodium("sxSha512", empty) is not "OXT_NO_HANDLER")
+end oxSodiumHasExpansion
+
+private function oxLoadCookie
+   -- Read the 32 raw cookie bytes from the authoritative PROTOCOLINFO path
+   -- (docs/03). binfile is binary-safe. Returns true on a plausible 32-byte read.
+   if sControlCookieFile is empty then
+      return false
+   end if
+   local tBytes
+   put url ("binfile:" & sControlCookieFile) into tBytes
+   if the number of bytes of tBytes is not 32 then
+      return false
+   end if
+   put tBytes into sControlCookieBytes
+   return true
+end oxLoadCookie
+
+-- ==========================================================================
+-- Small pure helpers.
 -- ==========================================================================
 
 private function effectiveSocksPort
@@ -192,8 +1519,251 @@ private function effectiveControlPort
    return sControlPort
 end effectiveControlPort
 
--- Uniform "framework stub" reply, so a caller sees a clear, honest error
--- rather than silence while the bodies are being built out phase by phase.
-private function notImplemented pWhat
-   return "OnionXT: " & pWhat & " is not implemented yet (see IMPLEMENTATION-PLAN.md)"
-end notImplemented
+private function oxAllocHandle
+   -- Monotonic; 0 is never a valid handle so a zero/empty is always a clean miss.
+   if sNextHandle is empty then
+      put 0 into sNextHandle
+   end if
+   add 1 to sNextHandle
+   return sNextHandle
+end oxAllocHandle
+
+private command oxSafeCloseSocket pSocketID
+   -- Idempotent close: only close ids the engine still lists as open, so closing
+   -- a stale/unknown id is a clean no-op (VERIFY the engine tolerates it anyway).
+   if pSocketID is empty then
+      exit oxSafeCloseSocket
+   end if
+   if pSocketID is among the lines of the openSockets then
+      close socket pSocketID
+   end if
+end oxSafeCloseSocket
+
+private command oxInvokeStreamCallback pStream, pEvent, pData
+   oxDispatch sStreams[pStream]["callback"], pStream, pEvent, pData
+end oxInvokeStreamCallback
+
+private command oxDispatch pHandlerName, pArg1, pArg2, pArg3
+   -- Deliver to the app; a missing handler is a clean no-op so an app wires only
+   -- the callbacks it uses. Guard the call so a throwing app handler cannot break
+   -- the state machine.
+   if pHandlerName is empty then
+      exit oxDispatch
+   end if
+   try
+      dispatch pHandlerName to oxCallbackTarget() with pArg1, pArg2, pArg3
+   catch tIgnore
+      -- Swallow app-side callback errors; the transport must keep running.
+   end try
+end oxDispatch
+
+private function oxCallbackTarget
+   -- The object the app callbacks live in. Explicitly set is authoritative;
+   -- otherwise the topStack is the best default (VERIFY it is the app's stack).
+   if sCallbackOwner is not empty then
+      return sCallbackOwner
+   end if
+   return the topStack
+end oxCallbackTarget
+
+private function oxCrlf
+   -- The wire line terminator as explicit bytes-to-be (U+000D U+000A), so the
+   -- byte value never depends on how the engine defines the `crlf` constant.
+   return numToChar(13) & numToChar(10)
+end oxCrlf
+
+private command oxStripLineEnd @pLine
+   -- Strip a trailing LF and/or CR from a decoded reply line, in either order.
+   repeat while the last char of pLine is numToChar(10) or the last char of pLine is numToChar(13)
+      delete the last char of pLine
+   end repeat
+end oxStripLineEnd
+
+private function oxFieldAfter pText, pMarker
+   -- The whitespace-delimited token immediately following pMarker in pText, or
+   -- empty. Used for METHODS=, PROGRESS=, ServiceID=, version=, SERVERHASH=, etc.
+   -- itemDelimiter is global mutable state, so save and restore it (gotcha 7).
+   local tPos, tRest, tSaved, tOut
+   put offset(pMarker, pText) into tPos
+   if tPos is 0 then
+      return empty
+   end if
+   put char (tPos + the number of chars of pMarker) to -1 of pText into tRest
+   -- Stop at the first space (values here are single tokens; quoted values use
+   -- oxQuotedValueAfter instead).
+   put the itemDelimiter into tSaved
+   set the itemDelimiter to space
+   put item 1 of tRest into tOut
+   set the itemDelimiter to tSaved
+   return tOut
+end oxFieldAfter
+
+private function oxQuotedValueAfter pText, pMarker
+   -- The C-quoted string value following pMarker (e.g. COOKIEFILE="..."). Returns
+   -- the raw (still-escaped) inside of the quotes; the caller un-escapes.
+   local tPos, tRest, tOut, tI, tCh, tEsc
+   put offset(pMarker, pText) into tPos
+   if tPos is 0 then
+      return empty
+   end if
+   put char (tPos + the number of chars of pMarker) to -1 of pText into tRest
+   if char 1 of tRest is not quote then
+      -- Unquoted value: take up to the next space (save/restore itemDelimiter).
+      local tSaved, tOut
+      put the itemDelimiter into tSaved
+      set the itemDelimiter to space
+      put item 1 of tRest into tOut
+      set the itemDelimiter to tSaved
+      return tOut
+   end if
+   -- Walk from just after the opening quote to the matching unescaped quote.
+   put empty into tOut
+   put false into tEsc
+   repeat with tI = 2 to the number of chars of tRest
+      put char tI of tRest into tCh
+      if tEsc then
+         put tCh after tOut
+         put false into tEsc
+      else if tCh is "\" then
+         put tCh after tOut
+         put true into tEsc
+      else if tCh is quote then
+         exit repeat
+      else
+         put tCh after tOut
+      end if
+   end repeat
+   return tOut
+end oxQuotedValueAfter
+
+private function oxCUnescape pStr
+   -- Undo Tor's C-style string escapes (docs/03): \n \t \r, octal \0..\377, and
+   -- backslash-before-any-other-char is that literal char.
+   local tOut, tI, tN, tCh, tNext, tOct
+   put empty into tOut
+   put the number of chars of pStr into tN
+   put 1 into tI
+   repeat while tI <= tN
+      put char tI of pStr into tCh
+      if tCh is "\" and tI < tN then
+         put char (tI + 1) of pStr into tNext
+         if tNext is "n" then
+            put numToChar(10) after tOut
+            add 2 to tI
+         else if tNext is "t" then
+            put numToChar(9) after tOut
+            add 2 to tI
+         else if tNext is "r" then
+            put numToChar(13) after tOut
+            add 2 to tI
+         else if tNext is in "01234567" then
+            -- Up to 3 octal digits.
+            put empty into tOct
+            add 1 to tI
+            repeat while tI <= tN and (the number of chars of tOct) < 3 and (char tI of pStr) is in "01234567"
+               put char tI of pStr after tOct
+               add 1 to tI
+            end repeat
+            put numToChar(oxOctalToNum(tOct)) after tOut
+         else
+            put tNext after tOut
+            add 2 to tI
+         end if
+      else
+         put tCh after tOut
+         add 1 to tI
+      end if
+   end repeat
+   return tOut
+end oxCUnescape
+
+private function oxOctalToNum pOct
+   local tVal, tI
+   put 0 into tVal
+   repeat with tI = 1 to the number of chars of pOct
+      put tVal * 8 + (charToNum(char tI of pOct) - 48) into tVal
+   end repeat
+   return tVal
+end oxOctalToNum
+
+private function oxQuoteEscape pStr
+   -- Escape backslash and double-quote for a control-port QuotedString.
+   local tOut
+   put pStr into tOut
+   replace "\" with "\\" in tOut
+   replace quote with ("\" & quote) in tOut
+   return tOut
+end oxQuoteEscape
+
+private function oxBytesToHex pData
+   -- Lowercase hex (high nibble first). H* packs/unpacks the whole run.
+   local tHex
+   binaryDecode "H*", pData, tHex
+   return tHex
+end oxBytesToHex
+
+private function oxHexToBytes pHex
+   return binaryEncode("H*", pHex)
+end oxHexToBytes
+
+private function oxByteHex pNum
+   -- Two-digit hex for one byte value (for error messages).
+   return oxBytesToHex(numToByte(pNum))
+end oxByteHex
+
+private function oxHostOfSocket pSocketID
+   -- The host part of an engine socket id "host:port" or "host:port|name".
+   local tSaved, tOut
+   put the itemDelimiter into tSaved
+   set the itemDelimiter to ":"
+   put item 1 of pSocketID into tOut
+   set the itemDelimiter to tSaved
+   return tOut
+end oxHostOfSocket
+
+private function oxMethodOffered pMethod
+   -- sControlMethods is a comma list; force comma before testing membership.
+   local tSaved, tResult
+   put the itemDelimiter into tSaved
+   set the itemDelimiter to comma
+   put (pMethod is among the items of sControlMethods) into tResult
+   set the itemDelimiter to tSaved
+   return tResult
+end oxMethodOffered
+
+private function oxStripWhitespace pStr
+   local tOut
+   put pStr into tOut
+   replace numToChar(10) with empty in tOut
+   replace numToChar(13) with empty in tOut
+   replace space with empty in tOut
+   replace tab with empty in tOut
+   return tOut
+end oxStripWhitespace
+
+private function oxTrim pStr
+   local tOut
+   put pStr into tOut
+   repeat while the first char of tOut is in (space & tab & numToChar(10) & numToChar(13))
+      delete the first char of tOut
+   end repeat
+   repeat while the last char of tOut is in (space & tab & numToChar(10) & numToChar(13))
+      delete the last char of tOut
+   end repeat
+   return tOut
+end oxTrim
+
+private function oxZeroBytes pCount
+   local tOut, tI
+   put empty into tOut
+   repeat with tI = 1 to pCount
+      put numToByte(0) after tOut
+   end repeat
+   return tOut
+end oxZeroBytes
+
+private function oxProcessId
+   -- Best-effort current process id for __OwningControllerProcess (Mode B).
+   -- VERIFY the available accessor on your OXT build; empty is tolerated by tor.
+   return the processId
+end oxProcessId
