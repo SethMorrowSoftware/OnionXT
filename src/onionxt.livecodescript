@@ -281,7 +281,7 @@ command oxCtlLine pSocketID, pData
    -- Control replies are ASCII; decode as text, then strip the line terminator
    -- defensively (VERIFY: whether `read until crlf` includes the CRLF).
    put textDecode(pData, "UTF-8") into tLine
-   oxStripLineEnd tLine
+   put oxStripLineEnd(tLine) into tLine
 
    if sCtlInData then
       -- Inside a 250+ CmdData block: a lone "." ends it; other lines are data
@@ -1270,7 +1270,7 @@ command oxTransportDial pAddress, pPort
       put pPort into tPort
    end if
    put pAddress into tHost
-   if tHost does not end with ".onion" then
+   if not (tHost ends with ".onion") then
       local tPub
       if the number of chars of tHost is 64 then
          put oxHexToBytes(tHost) into tPub
@@ -1608,11 +1608,14 @@ private function oxCrlf
    return numToChar(13) & numToChar(10)
 end oxCrlf
 
-private command oxStripLineEnd @pLine
+private function oxStripLineEnd pLine
    -- Strip a trailing LF and/or CR from a decoded reply line, in either order.
-   repeat while the last char of pLine is numToChar(10) or the last char of pLine is numToChar(13)
+   -- A plain function (returns the trimmed line) rather than a @-by-reference
+   -- command, to avoid the less-common reference-parameter construct.
+   repeat while pLine is not empty and (the last char of pLine is numToChar(10) or the last char of pLine is numToChar(13))
       delete the last char of pLine
    end repeat
+   return pLine
 end oxStripLineEnd
 
 private function oxFieldAfter pText, pMarker
@@ -1645,7 +1648,8 @@ private function oxQuotedValueAfter pText, pMarker
    put char (tPos + the number of chars of pMarker) to -1 of pText into tRest
    if char 1 of tRest is not quote then
       -- Unquoted value: take up to the next space (save/restore itemDelimiter).
-      local tSaved, tOut
+      -- tOut is already declared at the handler top; only tSaved is new here.
+      local tSaved
       put the itemDelimiter into tSaved
       set the itemDelimiter to space
       put item 1 of tRest into tOut
