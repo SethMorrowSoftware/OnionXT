@@ -182,7 +182,7 @@ command oxConnectControl
    put empty into sCtlQueue
    -- Bound the connect/handshake so a stalled daemon fails cleanly.
    set the socketTimeoutInterval to kOxHandshakeTimeout
-   open socket to tSocketID with message oxCtlOpened
+   open socket to tSocketID with message "oxCtlOpened"
    -- A watchdog independent of the (repeating) socketTimeout: if we are not
    -- authenticated within the deadline, tear the connection down.
    send ("oxCtlDeadline " & quote & tSocketID & quote) to me in kOxHandshakeTimeout milliseconds
@@ -231,7 +231,7 @@ command oxCtlOpened pSocketID
    put "protocolinfo" into sControlState
    oxStatusUpdate "control", "connected"
    -- One outstanding CRLF read at a time; re-armed at the end of oxCtlLine.
-   read from socket pSocketID until crlf with message oxCtlLine
+   read from socket pSocketID until crlf with message "oxCtlLine"
    oxCtlSend "PROTOCOLINFO 1", "protocolinfo"
 end oxCtlOpened
 
@@ -333,7 +333,7 @@ end oxCtlLine
 private command oxCtlRearm pSocketID
    -- Keep exactly one read outstanding, but only while the socket is still ours.
    if pSocketID is sControlSocket then
-      read from socket pSocketID until crlf with message oxCtlLine
+      read from socket pSocketID until crlf with message "oxCtlLine"
    end if
 end oxCtlRearm
 
@@ -601,7 +601,7 @@ command oxDial pHost, pPort
    put empty into sStreams[tHandle]["callback"]
    put tHandle into sSockToStream[tSocketID]
    set the socketTimeoutInterval to kOxHandshakeTimeout
-   open socket to tSocketID with message oxSocksOpened
+   open socket to tSocketID with message "oxSocksOpened"
    send ("oxStreamDeadline " & tHandle) to me in kOxHandshakeTimeout milliseconds
    return tHandle
 end oxDial
@@ -652,7 +652,7 @@ command oxSocksOpened pSocketID
    end if
    put "greeting" into sStreams[tHandle]["state"]
    write numToByte(5) & numToByte(1) & numToByte(0) to socket pSocketID
-   read from socket pSocketID for 2 with message oxSocksMethod
+   read from socket pSocketID for 2 with message "oxSocksMethod"
 end oxSocksOpened
 
 command oxSocksMethod pSocketID, pData
@@ -701,7 +701,7 @@ command oxSocksMethod pSocketID, pData
    -- Read the fixed 4-byte reply head (VER REP RSV ATYP); the BND.ADDR that
    -- follows is variable and framed by ATYP (docs/02 step 3).
    put "replyhead" into sStreams[tHandle]["state"]
-   read from socket pSocketID for 4 with message oxSocksReplyHead
+   read from socket pSocketID for 4 with message "oxSocksReplyHead"
 end oxSocksMethod
 
 command oxSocksReplyHead pSocketID, pData
@@ -730,13 +730,13 @@ command oxSocksReplyHead pSocketID, pData
    -- frame past it so the socket is left at the start of the tunnel payload.
    if tAtyp is 1 then
       put "replyrest" into sStreams[tHandle]["state"]
-      read from socket pSocketID for 6 with message oxSocksReplyDone     -- 4 + 2
+      read from socket pSocketID for 6 with message "oxSocksReplyDone"     -- 4 + 2
    else if tAtyp is 4 then
       put "replyrest" into sStreams[tHandle]["state"]
-      read from socket pSocketID for 18 with message oxSocksReplyDone    -- 16 + 2
+      read from socket pSocketID for 18 with message "oxSocksReplyDone"    -- 16 + 2
    else if tAtyp is 3 then
       put "replylen" into sStreams[tHandle]["state"]
-      read from socket pSocketID for 1 with message oxSocksReplyLen
+      read from socket pSocketID for 1 with message "oxSocksReplyLen"
    else
       oxStreamFail tHandle, "SOCKS reply has an unknown address type (" & tAtyp & ")"
    end if
@@ -756,7 +756,7 @@ command oxSocksReplyLen pSocketID, pData
    local tLen
    put byteToNum(byte 1 of pData) + 2 into tLen     -- address bytes + 2 port bytes
    put "replyrest" into sStreams[tHandle]["state"]
-   read from socket pSocketID for tLen with message oxSocksReplyDone
+   read from socket pSocketID for tLen with message "oxSocksReplyDone"
 end oxSocksReplyLen
 
 command oxSocksReplyDone pSocketID, pData
@@ -773,7 +773,7 @@ command oxSocksReplyDone pSocketID, pData
    -- VERIFY: the no-quantifier `read ... with message` streams available bytes;
    -- if the engine instead blocks until EOF, switch to a bounded `for N` loop
    -- driven by socketClosed for the tail.
-   read from socket pSocketID with message oxStreamData
+   read from socket pSocketID with message "oxStreamData"
 end oxSocksReplyDone
 
 command oxStreamData pSocketID, pData
@@ -789,7 +789,7 @@ command oxStreamData pSocketID, pData
    end if
    -- Re-arm only if the stream is still live (the callback may have closed it).
    if sSockToStream[pSocketID] is not empty then
-      read from socket pSocketID with message oxStreamData
+      read from socket pSocketID with message "oxStreamData"
    end if
 end oxStreamData
 
@@ -936,7 +936,7 @@ private function oxStartService pVirtualPort, pLocalPort
       -- Bind loopback only. VERIFY: the classic `accept connections on port`
       -- has no bind-address argument and may listen on 0.0.0.0; oxPeerAccepted
       -- enforces loopback by rejecting any non-127.0.0.1 peer before reading.
-      accept connections on pLocalPort with message oxPeerAccepted
+      accept connections on port pLocalPort with message "oxPeerAccepted"
       put true into sServices[tHandle]["listening"]
    end if
    put tHandle into sLocalToService[pLocalPort]
@@ -1016,7 +1016,7 @@ command oxPeerAccepted pSocketID
    -- before there is a callback to receive it.
    oxDispatch sPeerCallback, tHandle, oxGuessService(pSocketID), tPeerHost
    if sSockToStream[pSocketID] is not empty then
-      read from socket pSocketID with message oxStreamData
+      read from socket pSocketID with message "oxStreamData"
    end if
 end oxPeerAccepted
 
