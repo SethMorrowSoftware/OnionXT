@@ -1117,6 +1117,18 @@ private function oxNormalizeAddress pOnionAddress
    return tCore
 end oxNormalizeAddress
 
+private function oxPow2 pN
+   -- 2 to the pN, as an exact integer, WITHOUT the ^ operator (some xTalk
+   -- parsers reject `^` in a div/mod expression). pN is small in base32 (0..12),
+   -- so this is a few multiplies and stays well within exact-integer range.
+   local tR, tI
+   put 1 into tR
+   repeat with tI = 1 to pN
+      multiply tR by 2
+   end repeat
+   return tR
+end oxPow2
+
 private function oxBase32Encode pData
    -- RFC 4648 base32, lowercase, no padding. Pure bit-packing: accumulate input
    -- bytes MSB-first into a small buffer and emit 5-bit groups. The buffer is
@@ -1132,14 +1144,14 @@ private function oxBase32Encode pData
       add 8 to tBits
       repeat while tBits >= 5
          subtract 5 from tBits
-         put (tValue div (2 ^ tBits)) mod 32 into tIndex
+         put (tValue div oxPow2(tBits)) mod 32 into tIndex
          put char (tIndex + 1) of kOxBase32Alphabet after tOut
       end repeat
-      put tValue mod (2 ^ tBits) into tValue        -- keep only the pending bits
+      put tValue mod oxPow2(tBits) into tValue        -- keep only the pending bits
    end repeat
    if tBits > 0 then
       -- Left-align the final partial group and emit it (canonical no-pad tail).
-      put (tValue * (2 ^ (5 - tBits))) mod 32 into tIndex
+      put (tValue * oxPow2(5 - tBits)) mod 32 into tIndex
       put char (tIndex + 1) of kOxBase32Alphabet after tOut
    end if
    return tOut
@@ -1164,9 +1176,9 @@ private function oxBase32Decode pText
       add 5 to tBits
       if tBits >= 8 then
          subtract 8 from tBits
-         put (tValue div (2 ^ tBits)) mod 256 into tByteOut
+         put (tValue div oxPow2(tBits)) mod 256 into tByteOut
          put numToByte(tByteOut) after tOut
-         put tValue mod (2 ^ tBits) into tValue
+         put tValue mod oxPow2(tBits) into tValue
       end if
    end repeat
    return tOut
