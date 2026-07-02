@@ -31,6 +31,7 @@
 --       pKind = "ready"     pInfo = empty           (bootstrap reached 100)
 --       pKind = "service"   pInfo = <address>.onion (ADD_ONION returned it)
 --       pKind = "serviceReady" pInfo = <address>    (descriptor uploaded)
+--       pKind = "notice"    pInfo = <diagnostic>    (e.g. an accepted peer's raw id)
 --       pKind = "event"     pInfo = <raw 650 line>  (advanced; opt-in noise)
 --   stream callback  <handler> pStream, pEvent, pData
 --       pEvent = "open"   the SOCKS tunnel (or inbound peer) is live
@@ -876,6 +877,9 @@ command oxCreateService pVirtualPort, pLocalPort
    end if
    local tHandle
    put oxStartService(pVirtualPort, pLocalPort) into tHandle
+   if tHandle is not an integer then
+      return tHandle          -- listener did not bind; surfaced verbatim
+   end if
    -- Flags=Detach keeps the service published even if the control connection
    -- drops (a transient socketClosed/socketError, or a reconnect): without it, an
    -- ADD_ONION service dies with its control connection while its descriptor
@@ -913,6 +917,9 @@ command oxCreateServiceFromSeed pSeed, pVirtualPort, pLocalPort
    put oxStripWhitespace(base64Encode(tExpanded)) into tBlob
    local tHandle
    put oxStartService(pVirtualPort, pLocalPort) into tHandle
+   if tHandle is not an integer then
+      return tHandle          -- listener did not bind; surfaced verbatim
+   end if
    -- Flags=Detach: keep the service alive across a control-connection drop (see
    -- oxCreateService); DEL_ONION on teardown still removes it.
    oxCtlSend "ADD_ONION ED25519-V3:" & tBlob & " Flags=Detach Port=" & pVirtualPort & ",127.0.0.1:" & pLocalPort, "add_onion:" & tHandle
@@ -946,8 +953,16 @@ private function oxStartService pVirtualPort, pLocalPort
    if sLocalToService[pLocalPort] is empty then
       -- Bind loopback only. VERIFY: the classic `accept connections on port`
       -- has no bind-address argument and may listen on 0.0.0.0; oxPeerAccepted
-      -- enforces loopback by rejecting any non-127.0.0.1 peer before reading.
+      -- enforces loopback by rejecting any non-loopback peer before reading.
       accept connections on port pLocalPort with message "oxPeerAccepted"
+      if the result is not empty then
+         -- The listener did not bind (most often the local port is already in use
+         -- by a prior run or another app). Fail closed: with no listener, Tor
+         -- forwards inbound onion traffic to a dead port and the visitor gets an
+         -- empty response, which looks exactly like a broken onion.
+         delete variable sServices[tHandle]
+         return "OnionXT: cannot listen on 127.0.0.1:" & pLocalPort & " (" & the result & ")"
+      end if
       put true into sServices[tHandle]["listening"]
    end if
    put tHandle into sLocalToService[pLocalPort]
@@ -1005,13 +1020,16 @@ end oxServiceIsReady
 
 command oxPeerAccepted pSocketID
    -- Tor forwarded an inbound onion connection to our loopback listener. Enforce
-   -- loopback (security-critical: reject any non-127.0.0.1 peer before reading a
+   -- loopback (security-critical: reject any non-loopback peer before reading a
    -- byte), wrap the accepted socket as an inbound stream, and hand it to the app.
+   -- Emit a diagnostic notice with the RAW accepted id so a misparse is visible.
+   oxStatusUpdate "notice", "accepted connection id=[" & pSocketID & "]"
    local tPeerHost
    put oxHostOfSocket(pSocketID) into tPeerHost
-   if tPeerHost is not kOxHost then
+   if not oxHostIsLoopback(tPeerHost) then
       -- Not a Tor-forwarded loopback connection: refuse it (docs LiveCode ref;
       -- the listener may be bound to all interfaces).
+      oxStatusUpdate "notice", "rejected non-loopback peer host [" & tPeerHost & "]"
       oxSafeCloseSocket pSocketID
       exit oxPeerAccepted
    end if
@@ -1045,6 +1063,32 @@ private function oxGuessService pSocketID
    end if
    return empty
 end oxGuessService
+
+private function oxHostIsLoopback pHost
+   -- Accept a Tor-forwarded (loopback) peer no matter how the engine spells the
+   -- local address in the accepted-socket id: "127.0.0.1", any "127.x" in the
+   -- 127.0.0.0/8 block, IPv6 "::1" / "[::1]", the name "localhost", or empty
+   -- (some engines report no host for a local accept). Reject anything else, so a
+   -- listener that bound to all interfaces cannot be reached by a routable peer.
+   local tHost
+   put pHost into tHost
+   if tHost is empty then
+      return true
+   end if
+   if tHost is kOxHost then
+      return true
+   end if
+   if tHost begins with "127." then
+      return true
+   end if
+   if tHost is "::1" or tHost is "[::1]" then
+      return true
+   end if
+   if tHost is "localhost" then
+      return true
+   end if
+   return false
+end oxHostIsLoopback
 
 -- ==========================================================================
 -- Address helpers: a v3 .onion address IS an ed25519 public key

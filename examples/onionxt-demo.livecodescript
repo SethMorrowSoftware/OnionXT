@@ -830,6 +830,10 @@ on onStatus pKind, pInfo
       demoSetStatus "svc:status", "reachable - open it in Tor Browser now", "ok"
       demoAppendLog "svc:log", "descriptor uploaded; the onion is reachable"
       demoAppendLog "svc:log", "open  http://" & (field "svc:address") & "/  in Tor Browser (keep this demo running)"
+   else if pKind is "notice" then
+      -- Library diagnostics (e.g. every accepted connection's raw socket id, so a
+      -- misparse or a rejected loopback peer is visible in the Service log).
+      demoAppendLog "svc:log", pInfo
    end if
 end onStatus
 
