@@ -603,6 +603,7 @@ on onSvcPeerStream pStream, pEvent, pData
       -- read armed, which drains them so our close is clean, not a reset.
       if sHttpServed[pStream] is not true then
          put true into sHttpServed[pStream]
+         demoAppendLog "svc:log", "request received (" & (the number of bytes of pData) & " bytes)"
          demoServeHttp pStream, pData
       end if
    else if pEvent is "closed" then
@@ -618,7 +619,7 @@ private command demoServeHttp pStream, pRequest
    -- Answer an inbound HTTP request with a minimal, correct HTTP/1.1 response so
    -- the onion renders in a browser. OnionXT moves the bytes; the HTTP framing is
    -- ours (a real app would layer its own protocol here just the same).
-   local tCrlf, tBody, tBodyBytes, tHeaders, tReqLine
+   local tCrlf, tBody, tBodyBytes, tHeaders, tResponse, tWriteErr
    put numToChar(13) & numToChar(10) into tCrlf
    put field "svc:html" into tBody
    if tBody is empty then
@@ -633,20 +634,18 @@ private command demoServeHttp pStream, pRequest
    put "Content-Length: " & (the number of bytes of tBodyBytes) & tCrlf after tHeaders
    put "Connection: close" & tCrlf after tHeaders
    put tCrlf after tHeaders
-   oxWrite pStream, (textEncode(tHeaders, "UTF-8") & tBodyBytes)
-   -- Log the request's first line (decoded defensively; the callback is wrapped in
-   -- the library's try, but keep our own guard so a bad byte cannot skip the log).
-   put "(request)" into tReqLine
-   try
-      put line 1 of textDecode(pRequest, "UTF-8") into tReqLine
-   catch tErr
-   end try
-   demoAppendLog "svc:log", "visitor: " & tReqLine
-   demoAppendLog "svc:log", "served a " & (the number of bytes of tBodyBytes) & "-byte HTML page"
+   put (textEncode(tHeaders, "UTF-8") & tBodyBytes) into tResponse
+   oxWrite pStream, tResponse
+   put the result into tWriteErr
+   if tWriteErr is empty then
+      demoAppendLog "svc:log", "wrote " & (the number of bytes of tResponse) & " bytes (body " & (the number of bytes of tBodyBytes) & ")"
+   else
+      demoAppendLog "svc:log", "oxWrite FAILED: " & tWriteErr
+   end if
    -- Close after a short delay (Connection: close): lets the synchronous write
    -- flush and the rest of the request drain, so the browser never sees a truncated
    -- response or a reset. demoFinishServe is public because `send` needs the message path.
-   send ("demoFinishServe " & pStream) to me in 400 milliseconds
+   send ("demoFinishServe " & pStream) to me in 600 milliseconds
 end demoServeHttp
 
 command demoFinishServe pStream
