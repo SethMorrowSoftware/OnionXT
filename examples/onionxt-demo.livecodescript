@@ -372,6 +372,18 @@ private function demoConnectHint pMsg
    return pMsg
 end demoConnectHint
 
+private function demoListenHint pMsg
+   -- A failed local listen is cryptic too. Error 10013 (Windows WSAEACCES) on a
+   -- listen almost always means the local port is RESERVED or blocked by the OS
+   -- (Hyper-V / WSL2 / Docker reserve whole port ranges), NOT that another app has
+   -- it (that is 10048). Either way, the fix is a different local port.
+   if "10013" is in pMsg or "cannot listen" is in pMsg or "10048" is in pMsg then
+      return pMsg & return & \
+         "The local port is reserved or blocked by the OS (common on Windows with Hyper-V/WSL/Docker). Change 'Local port' to another value (e.g. 8090) and Publish again; leave Virtual port at 80."
+   end if
+   return pMsg
+end demoListenHint
+
 private command demoAppendLog pField, pText
    -- Append a line and scroll to the bottom (formattedHeight is the full content
    -- height; setting scroll past the max clamps to the bottom).
@@ -535,7 +547,7 @@ private command demoBuildServiceTab
    demoMakeLabel "svc:vLbl", "24,166,116,188", "Virtual port:"
    demoMakeInput "svc:vport", "120,163,200,189", 80, ""
    demoMakeLabel "svc:lLbl", "216,166,304,188", "Local port:"
-   demoMakeInput "svc:lport", "308,163,390,189", 8080, ""
+   demoMakeInput "svc:lport", "308,163,390,189", 8090, ""
    demoMakeButton "svc:publish", "410,161,560,191", "Publish onion"
    demoMakeButton "svc:remove", "568,161,688,191", "Remove"
    demoMakeLabel "svc:status", "24,206,796,228", "not published"
@@ -574,7 +586,8 @@ private command demoPublishService
       demoAppendLog "svc:log", "service handle " & tHandle & " requested; awaiting ADD_ONION reply ..."
       demoUpdateButtons
    else
-      demoSetStatus "svc:status", tHandle, "fail"
+      demoSetStatus "svc:status", "publish failed (see log)", "fail"
+      demoAppendLog "svc:log", demoListenHint(tHandle)
    end if
 end demoPublishService
 
