@@ -32,10 +32,11 @@ livecodescript:
 - **Phase 8 (lifecycle/native):** optional `oxLaunchTor` / `oxStopTor` are implemented and flagged;
   no native shim is needed (v1 is pure script).
 
-**Not yet done:** the on-engine pass. Nothing here has shaken hands with a real tor daemon on an OXT
-engine, so every socket behaviour stays "designed and statically reasoned; needs an on-engine pass"
-(each unknown is flagged `VERIFY:` in the source), and no transport claim is "done" until the phase-4
-round trip runs. The phases below remain the source of truth for the "done when" bar.
+**On-engine pass: done.** The library has run on a real OXT engine against a live tor daemon (and Tor
+Browser): dialing through SOCKS, control-port SAFECOOKIE auth, publishing a v3 onion, serving an inbound
+HTTP request (viewable in Tor Browser), and bootstrap are all confirmed (see CLAUDE.md "As-built notes").
+The only path still flagged `VERIFY:` is the optional Mode B tor launch (`open process`). The phases
+below remain the source of truth for the "done when" bar.
 
 ## Phase 0 - Ground truth and decisions (no code that ships)
 

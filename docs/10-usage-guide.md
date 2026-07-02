@@ -5,9 +5,10 @@ self-authenticating inbound address. This is the from-zero guide: how to load th
 library, point it at a tor daemon, dial out, publish an onion service, handle the callbacks, compose
 SodiumXT for the parts OnionXT deliberately does not do, and read the honesty caveats.
 
-> OnionXT is livecodescript and has not yet run on an OXT engine. Everything below is the intended API
-> and the intended shape of a program that uses it; confirm the on-engine behaviour against a real tor
-> daemon before you rely on it (CLAUDE.md: "designed and statically reasoned; needs an on-engine pass").
+> OnionXT has run on a real OXT engine against a live tor daemon: dialing, control-port SAFECOOKIE auth,
+> publishing a v3 onion, serving an inbound request (viewable in Tor Browser), and bootstrap are all
+> confirmed. The optional Mode B tor launch is the one path not yet exercised. If something misbehaves,
+> the [Troubleshooting](../README.md#troubleshooting) section covers the failure modes seen during bring-up.
 
 ## 1. Start a tor daemon
 
