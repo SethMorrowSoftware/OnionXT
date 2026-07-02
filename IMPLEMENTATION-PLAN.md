@@ -8,6 +8,35 @@ done when it has shaken hands with an actual daemon on an OXT engine.
 Read [CLAUDE.md](CLAUDE.md) and the `docs/` spine first. House style and the static gate
 (`tools/check-livecodescript.py`) apply to every phase that touches script.
 
+## Status as built
+
+`src/onionxt.livecodescript` implements phases 1-7 and the optional Mode B of phase 8, all in pure
+livecodescript:
+
+- **Phase 1 (SOCKS5 dial):** implemented - `oxDial` / `oxWrite` / `oxSetStreamCallback` /
+  `oxCloseStream` / `oxStreamState` as an async state machine with the full REP map (incl. `0xF7`).
+- **Phase 2 (control connect + auth):** implemented - `oxConnectControl` / `oxDisconnectControl`,
+  PROTOCOLINFO discovery, all four auth methods (SAFECOOKIE/COOKIE/NULL/HASHEDPASSWORD) with the
+  single-in-flight command pipeline and 650 event demux.
+- **Phase 3 (publish + accept):** implemented - `oxCreateService` / `oxRemoveService` /
+  `oxServiceAddress`, listen-on-loopback-first, and a loopback-locked accept loop.
+- **Phase 4 (two-instance round trip):** the `examples/onion-roundtrip` harness is written; the actual
+  round trip is an on-engine milestone.
+- **Phase 5 (deterministic onions):** implemented - `oxCreateServiceFromSeed`, base32, and the
+  `oxAddressFromPublicKey` / `oxPublicKeyFromAddress` / `oxIsValidAddress` mapping, pinned by
+  `tools/onion-kat.py`.
+- **Phase 6 (events, bootstrap, negatives):** implemented - `SETEVENTS`, coalesced status,
+  central `socketError`/`socketClosed`/`socketTimeout` teardown, idempotent `oxShutdown`.
+- **Phase 7 (Riptide transport):** the `oxTransport*` seam is implemented; the live Riptide channel is
+  an integration milestone in the Riptide repo.
+- **Phase 8 (lifecycle/native):** optional `oxLaunchTor` / `oxStopTor` are implemented and flagged;
+  no native shim is needed (v1 is pure script).
+
+**Not yet done:** the on-engine pass. Nothing here has shaken hands with a real tor daemon on an OXT
+engine, so every socket behaviour stays "designed and statically reasoned; needs an on-engine pass"
+(each unknown is flagged `VERIFY:` in the source), and no transport claim is "done" until the phase-4
+round trip runs. The phases below remain the source of truth for the "done when" bar.
+
 ## Phase 0 - Ground truth and decisions (no code that ships)
 
 **Goal:** remove the unknowns before writing protocol code.

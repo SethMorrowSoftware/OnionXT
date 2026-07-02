@@ -299,6 +299,48 @@ it. Therefore:
 - **Never present Tor as a total anonymity guarantee.** Traffic correlation, a hostile local daemon,
   guard discovery, and descriptor-timing metadata remain; ship them labeled (doc 01, doc 09).
 
+## As-built notes (v1 implementation)
+
+The library is implemented in one file, `src/onionxt.livecodescript`. It is designed and statically
+reasoned against the specs; it has NOT run on an OXT engine, so the socket behaviours below are design
+decisions to confirm, not confirmed facts. Each is flagged `VERIFY:` in the source. Record the result
+of the on-engine pass here as it is learned (that is what this section is for).
+
+Design decisions worth knowing before you touch the code:
+
+- **Everything is a handle plus a callback.** `oxDial` / `oxCreateService` / `oxCreateServiceFromSeed`
+  return an integer handle through `the result` immediately and complete asynchronously; the app learns
+  the outcome through the status / stream / peer callbacks (signatures in doc 05 and the file header).
+  A command that yields a handle returns the integer on success or an `"OnionXT: ..."` string on
+  failure, so callers test `the result is an integer`. Inbound (accepted) and outbound (dialed) streams
+  are unified into the same tables, so `oxWrite` / `oxCloseStream` / the `"data"` event work identically.
+- **The control port is a single-in-flight pipeline.** One command at a time, the rest queued; a
+  continuation (run when a reply completes) enqueues the next command while the old label is still in
+  flight, and `oxCtlLine` then clears the label and drains the queue. `650` event lines are demuxed from
+  command replies by their leading status code. `itemDelimiter` is saved and restored around every use.
+- **Crypto is composed, never hand-rolled.** Every `sx*` call goes through `oxTrySodium` /
+  `oxTrySodium2`, which use `dispatch function ... to <callback owner>` and read `it = "unhandled"` to
+  detect an absent primitive, degrading to a clear `"needs SodiumXT sxXxx (docs/08)"` error (or a safe
+  fallback, e.g. SAFECOOKIE -> COOKIE). base32 and the ed25519 scalar clamp are pure byte ops and are
+  the only "math" done in script.
+- **base32 keeps its bit-buffer small.** The accumulator is masked to its pending bits each step so a
+  35-byte address never builds a 280-bit integer (which would lose precision past 2^53). The KAT in
+  `tools/onion-kat.py` pins the answers.
+
+The on-engine `VERIFY:` checklist (settle each against a real engine + tor daemon):
+
+1. `read ... until crlf` - is the trailing CRLF in the returned data? (`oxStripLineEnd` strips it either way.)
+2. `read ... for N with message` - exactly N raw bytes, no codepoint reinterpretation, on a binary socket?
+3. The no-quantifier `read ... with message oxStreamData` streams available bytes (does not block to EOF).
+4. The accepted-socket id format from `accept connections` (host:port vs host:port|N) - `oxHostOfSocket`
+   and `oxGuessService` parse it; loopback is enforced by rejecting any non-127.0.0.1 peer.
+5. `close socket <localPort>` actually stops the listener; `the openSockets` lists the ids we close.
+6. `dispatch [function] ... to <owner>` resolves app callbacks and `sx*` and reports `"unhandled"` for absent.
+7. Socket messages (`socketError`/`socketClosed`/`socketTimeout`) reach the library object; `socketTimeout` repeats.
+8. `the processId` / `open process` for the optional Mode B tor launch.
+
+Once the phase-4 round trip runs, promote the confirmed items from `VERIFY:` to fact here and in the docs.
+
 ## Git / workflow
 
 - Develop on a per-task branch (e.g. `claude/...`); commit there, open a **draft PR** if none exists.

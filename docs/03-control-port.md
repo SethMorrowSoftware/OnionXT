@@ -33,8 +33,10 @@ Document these exact lines in the example so a tester reproduces the environment
 - Read until you see a line whose separator is a space; that terminates the reply. Route unsolicited
   `650` lines (events) to the event state machine, not to the pending-command continuation.
 
-Status codes: `2xx` success (`250 OK`), `4xx`/`5xx` errors (`515` bad auth, `514` auth required,
-`512`/`513` syntax, `551` internal). Fail closed on any non-`2xx`.
+Status codes: `2xx` success (`250 OK`, `251` operation unnecessary), `4xx`/`5xx` errors (`514` auth
+required, `515` bad auth, `512` syntax error in argument, `513` unrecognized argument, `550` unspecified
+Tor error, `551` internal error, `552` unrecognized entity such as an unknown `ServiceID`). Fail closed
+on any non-`2xx`; branch on the numeric code, not on the human text after it (that text is not stable).
 
 ## Step 1: discover the auth method (PROTOCOLINFO)
 
@@ -54,7 +56,10 @@ The reply reports the offered methods and, for cookie auth, the cookie file path
 ```
 
 Parse `METHODS=` and `COOKIEFILE=`. Prefer methods in this order: `SAFECOOKIE` > `COOKIE` > `NULL` >
-`HASHEDPASSWORD`. Treat the `COOKIEFILE` path as authoritative; do not guess it.
+`HASHEDPASSWORD`. Treat the `COOKIEFILE` path as authoritative; do not guess it. The `COOKIEFILE`
+value is a C-quoted string: **un-escape it before opening the file** (`\n \t \r`, octal `\0..\377`, and
+a backslash before any other character is that literal character), so a path containing a space,
+backslash, or quote is read correctly.
 
 ## Step 2: authenticate
 
@@ -65,7 +70,10 @@ Send exactly one of these, matching the chosen method:
 - **SAFECOOKIE** (preferred; avoids sending the cookie in the clear): a challenge-response:
   1. `AUTHCHALLENGE SAFECOOKIE <ClientNonce-hex>` where ClientNonce is 32 random bytes (SodiumXT
      `sxRandomBytes(32)`).
-  2. Reply gives `SERVERHASH=<hex>` and `SERVERNONCE=<hex>`.
+  2. Reply gives `SERVERHASH=<hex>` and `SERVERNONCE=<hex>`. **This reply is a single, final,
+     space-separated line** (`250 AUTHCHALLENGE SERVERHASH=... SERVERNONCE=...`), not a `250-`
+     continuation followed by a separate `250 OK`; a parser that waits for a trailing `250 OK` after it
+     will hang.
   3. Verify `SERVERHASH == HMAC-SHA256(key = "Tor safe cookie authentication server-to-controller
      hash", msg = CookieBytes || ClientNonce || ServerNonce)` in constant time (SodiumXT
      `sxMemEqual`). If it fails, the control port is not the real Tor; abort.
@@ -110,7 +118,10 @@ Useful flags: `Flags=Detach` (service outlives the control connection), `Flags=D
 return the key). Without `Detach`, the service dies when the control connection closes, which is often
 the right default for a session-scoped service.
 
-Remove a service: `DEL_ONION <ServiceID>` -> `250 OK`.
+Remove a service: `DEL_ONION <ServiceID>` (the `ServiceID`, without `.onion`) -> `250 OK`; `512` on a
+bad argument count, `552` if the `ServiceID` is unknown or was not created on this control connection
+(and is not a detached service). Only services created on the same connection, or detached ones, can be
+removed.
 
 ## Step 4: listen locally FIRST
 

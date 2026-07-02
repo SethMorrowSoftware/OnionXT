@@ -60,8 +60,11 @@ Client sends:
 - `PORT` is the 2-byte big-endian virtual port of the service (for example 80 -> `0x00 0x50`).
 
 `binaryEncode` sketch (verify on-engine): build the fixed head, append `numToByte(length of tHost)`,
-append the host bytes, append the two port bytes with `binaryEncode("S", tPort)` (network-order
-short) or `numToByte(tPort div 256)` and `numToByte(tPort mod 256)`.
+append the host bytes, append the two port bytes big-endian. Build the port **by hand** as
+`numToByte(tPort div 256) & numToByte(tPort mod 256)`: do NOT use `binaryEncode("S", tPort)`, whose
+`S` is a **host-order** short and is wrong on a little-endian machine. The network-order code is
+`binaryEncode("n", tPort)` if you prefer a format string, but the hand-built two bytes make the wire
+bytes self-evident and depend on no format-code support.
 
 ## Step 3: the reply
 
@@ -104,9 +107,17 @@ Standard RFC 1928 codes plus Tor's onion-specific extensions (the ones a user ac
 | 0xF4 | onion service missing client authorization                          |
 | 0xF5 | onion service wrong client authorization                            |
 | 0xF6 | onion service invalid address                                       |
+| 0xF7 | onion service introduction timed out                                |
 
 The `0xF*` band is where "you dialed a dead or wrong onion" shows up; give those human messages, not a
-raw code.
+raw code. `0xF0..0xF5` are Tor proposal 304; `0xF6` (bad address) and `0xF7` (introduction timed out)
+were added later in Tor's `socks5_status.h`, so treat the band as open-ended and map an unknown `0xF*`
+to a generic "onion request failed" rather than rejecting it.
+
+**These extended codes only appear when the `SocksPort` has the `ExtendedErrors` flag set.** Without
+that flag, Tor collapses onion failures onto the standard `0x01` (general failure) or `0x04` (host
+unreachable), so OnionXT must map `0x01`/`0x04` to sensible messages too and must not depend on the
+`0xF*` codes being present.
 
 ## State machine (callback-driven)
 
