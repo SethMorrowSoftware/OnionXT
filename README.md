@@ -75,6 +75,8 @@ OnionXT/
   examples/
     socks-dial/             dial a host through Tor and read the reply
     onion-roundtrip/        two instances talk over Tor with no server, sealed by SodiumXT
+    onionxt-demo.livecodescript   an interactive, tabbed showcase of every ox* feature
+    onionxt-tests.livecodescript  a pure, offline self-test harness (sPass/sFail, KATs)
 ```
 
 ## Status
