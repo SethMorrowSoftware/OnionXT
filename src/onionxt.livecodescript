@@ -881,10 +881,11 @@ command oxCreateService pVirtualPort, pLocalPort
 end oxCreateService
 
 command oxCreateServiceFromSeed pSeed, pVirtualPort, pLocalPort
-   -- Deterministic, reproducible address: derive the ed25519 identity from
-   -- pSeed via SodiumXT and pass Tor the 64-byte ED25519-V3 expanded key (docs/04).
-   -- The expansion is a SodiumXT capability (docs/08); we compose it and fail
-   -- with a clear message if it is absent, never hand-roll SHA-512.
+   -- Deterministic, reproducible address: derive the ed25519 identity from pSeed
+   -- and pass Tor the 64-byte ED25519-V3 expanded key (docs/04). The expansion is
+   -- SodiumXT's sxSignSeedToExpandedKey (docs/08 gap #1, SHIPPED in ABI 6); we
+   -- compose it and fail with a clear message if it is absent, never hand-roll
+   -- SHA-512. Same seed -> same .onion on every run.
    local tError
    put oxCheckServiceArgs(pVirtualPort, pLocalPort) into tError
    if tError is not empty then
@@ -898,8 +899,10 @@ command oxCreateServiceFromSeed pSeed, pVirtualPort, pLocalPort
    if the number of bytes of tExpanded is not 64 then
       return tExpanded          -- a capability error, surfaced verbatim
    end if
-   -- Tor wants standard base64 (with padding); strip any whitespace the encoder
-   -- may insert (docs/04 base64 note).
+   -- Tor's ADD_ONION ED25519-V3: wants STANDARD RFC 4648 base64 (the +/ alphabet
+   -- with = padding). The engine's base64Encode emits exactly that; do NOT use
+   -- SodiumXT's sxBin2Base64, which is url-safe and unpadded and tor rejects.
+   -- Strip any line-wrap whitespace the encoder may insert (docs/04 base64 note).
    local tBlob
    put oxStripWhitespace(base64Encode(tExpanded)) into tBlob
    local tHandle
@@ -1213,31 +1216,22 @@ private function oxOnionChecksum pEd25519Pub
 end oxOnionChecksum
 
 private function oxExpandedKeyFromSeed pSeed
-   -- The 64-byte Tor ED25519-V3 expanded secret key (docs/04): prefer a dedicated
-   -- SodiumXT helper; else SHA-512(seed) with the scalar clamp done in script
-   -- (byte masking, not crypto). Returns the 64 bytes, or an "OnionXT:" error.
+   -- Compose SodiumXT's ABI-6 helper (docs/08 gap #1, now SHIPPED): a 32-byte seed
+   -- becomes the 64-byte Tor ED25519-V3 expanded secret key (SHA-512(seed) with the
+   -- ed25519 scalar clamp, all done inside SodiumXT so OnionXT hand-rolls nothing).
+   -- This is exactly the key ADD_ONION ED25519-V3:<key> wants (docs/04), and its
+   -- public key equals sxSignKeypairFromSeed(pSeed)'s, so the .onion address and the
+   -- app's signing identity stay consistent. Requires SodiumXT ABI >= 6.
    local tExpanded
-   put oxTrySodium("sxSignSeedToExpandedKey", pSeed) into tExpanded
-   if tExpanded is not "OXT_NO_HANDLER" then
-      return tExpanded          -- SodiumXT produced the 64 bytes directly
+   try
+      put sxSignSeedToExpandedKey(pSeed) into tExpanded
+   catch tError
+      return "OnionXT: oxCreateServiceFromSeed needs SodiumXT sxSignSeedToExpandedKey (requires SodiumXT ABI >= 6; see docs/08)"
+   end try
+   if the number of bytes of tExpanded is not 64 then
+      return "OnionXT: sxSignSeedToExpandedKey returned " & the number of bytes of tExpanded & " bytes, expected 64"
    end if
-   local tHash
-   put oxTrySodium("sxSha512", pSeed) into tHash
-   if tHash is "OXT_NO_HANDLER" then
-      return "OnionXT: oxCreateServiceFromSeed needs SodiumXT sxSignSeedToExpandedKey or sxSha512 (see docs/08)"
-   end if
-   if the number of bytes of tHash is not 64 then
-      return "OnionXT: sxSha512 returned " & the number of bytes of tHash & " bytes, expected 64"
-   end if
-   -- Clamp the scalar a = h[0:32]: a[0] &= 0xF8, a[31] &= 0x7F, a[31] |= 0x40;
-   -- RH = h[32:64]; expanded = a || RH (docs/04). Byte masking only.
-   local tByte1, tByte32
-   -- bitAnd / bitOr are OPERATORS in LiveCode (x bitAnd y), not functions, so
-   -- they are written infix, not bitAnd(x, y).
-   put (byteToNum(byte 1 of tHash) bitAnd 248) into tByte1
-   put (byteToNum(byte 32 of tHash) bitAnd 127) into tByte32
-   put (tByte32 bitOr 64) into tByte32
-   return numToByte(tByte1) & (byte 2 to 31 of tHash) & numToByte(tByte32) & (byte 33 to 64 of tHash)
+   return tExpanded
 end oxExpandedKeyFromSeed
 
 -- ==========================================================================
@@ -1430,38 +1424,46 @@ command oxStopTor
 end oxStopTor
 
 -- ==========================================================================
--- SodiumXT composition helpers. Every sx* call is wrapped so a MISSING primitive
--- degrades to a clear capability error rather than crashing (CLAUDE.md rule 1;
--- calling an undefined handler raises a catchable error). base32 and the scalar
--- clamp above are pure byte ops and are NOT routed through here.
+-- SodiumXT composition helpers (requires SodiumXT ABI >= 6 for the deterministic
+-- onion and SAFECOOKIE paths). Each sx* primitive is called DIRECTLY and wrapped
+-- in try/catch: an absent handler raises a catchable execution error, so a missing
+-- primitive degrades to a clear capability error rather than crashing, and the
+-- function's return value comes back unambiguously (CLAUDE.md rule 1; no crypto is
+-- hand-rolled here). base32 and the base64 encode are pure byte ops, NOT here.
 -- ==========================================================================
 
 private function oxSha3_256 pData
+   -- Deferred gap (docs/08 #2): libsodium has no SHA-3, so SodiumXT does not ship
+   -- sxSha3_256. Compose it if it ever lands; else a clear error. The checksum is a
+   -- nicety, not a security dependency (tor authenticates the onion at connect
+   -- time), so callers degrade to structural-only address checks.
    local tOut
-   put oxTrySodium("sxSha3_256", pData) into tOut
-   if tOut is "OXT_NO_HANDLER" then
-      return "OnionXT: this operation needs SodiumXT SHA3-256 (sxSha3_256, see docs/08)"
-   end if
+   try
+      put sxSha3_256(pData) into tOut
+   catch tError
+      return "OnionXT: the offline .onion checksum needs SodiumXT SHA3-256 (sxSha3_256, deferred gap, docs/08)"
+   end try
    return tOut
 end oxSha3_256
 
 private function oxHmac pKeyString, pMessage
-   -- HMAC-SHA256 with an ASCII key string; the key crosses as UTF-8 bytes.
+   -- HMAC-SHA256 (SodiumXT ABI >= 6). The ASCII key string crosses as its bytes.
    local tOut
-   put oxTrySodium2("sxHmacSha256", textEncode(pKeyString, "UTF-8"), pMessage) into tOut
-   if tOut is "OXT_NO_HANDLER" then
-      return "OnionXT: SAFECOOKIE auth needs SodiumXT HMAC-SHA256 (sxHmacSha256, see docs/08)"
-   end if
+   try
+      put sxHmacSha256(textEncode(pKeyString, "UTF-8"), pMessage) into tOut
+   catch tError
+      return "OnionXT: SAFECOOKIE auth needs SodiumXT HMAC-SHA256 (sxHmacSha256, SodiumXT ABI >= 6, docs/08)"
+   end try
    return tOut
 end oxHmac
 
 private function oxRandomBytes pCount
    local tOut
-   put oxTrySodium("sxRandomBytes", pCount) into tOut
-   if tOut is "OXT_NO_HANDLER" then
-      -- Should not be reached: SAFECOOKIE is only chosen when randomness exists.
+   try
+      put sxRandomBytes(pCount) into tOut
+   catch tError
       return empty
-   end if
+   end try
    return tOut
 end oxRandomBytes
 
@@ -1469,55 +1471,54 @@ private function oxConstantTimeEqual pA, pB
    -- Prefer SodiumXT's constant-time compare; fall back to a plain compare only
    -- when it is unavailable (acceptable on a loopback control port).
    local tOut
-   put oxTrySodium2("sxMemEqual", pA, pB) into tOut
-   if tOut is not "OXT_NO_HANDLER" then
+   try
+      put sxMemEqual(pA, pB) into tOut
       return (tOut is true)
-   end if
-   return (pA is pB)
+   catch tError
+      return (pA is pB)
+   end try
 end oxConstantTimeEqual
 
-private function oxTrySodium pFuncName, pArg
-   -- Call a one-argument SodiumXT function; return "OXT_NO_HANDLER" if it does
-   -- not exist, so callers can degrade. `dispatch function` reports absence
-   -- through `it` = "unhandled" without throwing, and the function's return
-   -- value lands in `the result` (docs LiveCode ref). Compute the target into a
-   -- local first (a function call is not passed inline as the dispatch target).
-   local tTarget
-   put oxCallbackTarget() into tTarget
-   dispatch function pFuncName to tTarget with pArg
-   if it is "unhandled" then
-      return "OXT_NO_HANDLER"
-   end if
-   return the result
-end oxTrySodium
-
-private function oxTrySodium2 pFuncName, pArg1, pArg2
-   local tTarget
-   put oxCallbackTarget() into tTarget
-   dispatch function pFuncName to tTarget with pArg1, pArg2
-   if it is "unhandled" then
-      return "OXT_NO_HANDLER"
-   end if
-   return the result
-end oxTrySodium2
-
 private function oxSodiumHasHmac
-   return (oxTrySodium2("sxHmacSha256", empty, empty) is not "OXT_NO_HANDLER")
+   -- True if SodiumXT (ABI >= 6) provides HMAC-SHA256. A benign 1-byte probe.
+   local tOut
+   try
+      put sxHmacSha256(numToByte(0), numToByte(0)) into tOut
+      return (the number of bytes of tOut is 32)
+   catch tError
+      return false
+   end try
 end oxSodiumHasHmac
 
 private function oxSodiumHasRandom
-   return (oxTrySodium("sxRandomBytes", 1) is not "OXT_NO_HANDLER")
+   local tOut
+   try
+      put sxRandomBytes(1) into tOut
+      return (the number of bytes of tOut is 1)
+   catch tError
+      return false
+   end try
 end oxSodiumHasRandom
 
 private function oxSodiumHasSha3
-   return (oxTrySodium("sxSha3_256", empty) is not "OXT_NO_HANDLER")
+   -- Deferred gap: expected false until SodiumXT ships SHA3-256 (docs/08 #2).
+   try
+      get sxSha3_256(empty)
+      return true
+   catch tError
+      return false
+   end try
 end oxSodiumHasSha3
 
 private function oxSodiumHasExpansion
-   if oxTrySodium("sxSignSeedToExpandedKey", oxZeroBytes(32)) is not "OXT_NO_HANDLER" then
-      return true
-   end if
-   return (oxTrySodium("sxSha512", empty) is not "OXT_NO_HANDLER")
+   -- True if SodiumXT (ABI >= 6) provides the seed -> expanded-key helper.
+   local tOut
+   try
+      put sxSignSeedToExpandedKey(oxZeroBytes(32)) into tOut
+      return (the number of bytes of tOut is 64)
+   catch tError
+      return false
+   end try
 end oxSodiumHasExpansion
 
 private function oxLoadCookie

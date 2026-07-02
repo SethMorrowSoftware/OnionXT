@@ -1,30 +1,42 @@
 # 08 - Capabilities Required (Upstream Gaps)
 
 OnionXT composes SodiumXT for all cryptography (CLAUDE.md rule 1) and the OXT engine for all socket
-I/O. A few narrow capabilities it wants are not yet available in those. This is the honest list, each
-with the OnionXT feature it blocks, options, and a recommendation. The family rule holds: a needed
+I/O. This is the honest list of the narrow crypto primitives it wants. The family rule holds: a needed
 crypto primitive is an **upstream SodiumXT feature request landed first**, never a hand-rolled hash in
 OnionXT.
 
+**Status as of SodiumXT ABI 6:** gaps #1 (ed25519 seed -> expanded key, `sxSignSeedToExpandedKey`) and
+#3 (HMAC-SHA256, `sxHmacSha256`) are **SHIPPED and composed** - deterministic-from-seed onions and
+SAFECOOKIE control auth now work. Gap #2 (SHA3-256, offline address checksum) stays **DEFERRED** by
+design (libsodium has no SHA-3, and the checksum is a nicety, not a security dependency). OnionXT
+therefore requires **SodiumXT ABI >= 6** for the deterministic-onion and SAFECOOKIE paths; the SOCKS
+dial path, Tor-generated onions, and COOKIE/NULL/HASHEDPASSWORD auth need no SodiumXT at all.
+
 ## SodiumXT gaps
 
-### 1. ed25519 seed -> expanded key (for deterministic onion services)
+### 1. ed25519 seed -> expanded key (for deterministic onion services) - SHIPPED (SodiumXT ABI 6)
+
+**Status: SHIPPED.** SodiumXT ABI 6 provides `sxSignSeedToExpandedKey(pSeed as Data) returns Data`: a
+32-byte seed becomes the 64-byte expanded ed25519 secret key (`SHA-512(seed)` with the scalar clamp,
+`a || RH`), done inside SodiumXT. OnionXT composes it directly in `oxExpandedKeyFromSeed` and
+`oxCreateServiceFromSeed`; the old script-side SHA-512 + clamp fallback is gone. Known-answer vector
+(seed = `0x42` x 32) pinned in `tools/onion-kat.py` and exercised by `examples/onionxt-tests.livecodescript`.
 
 - **Needed by:** `oxCreateServiceFromSeed` and any reproducible-address flow (doc 04). `ADD_ONION
   ED25519-V3:<key>` wants the 64-byte expanded ed25519 secret key (`SHA-512(seed)`, clamped, split into
-  scalar `a` and prefix `RH`), not libsodium's `seed || pubkey` secret key.
-- **Options:**
-  a. Add a dedicated SodiumXT helper, for example `sxSignSeedToExpandedKey(pSeed) returns Data` (65 or
-     64 bytes), which does the SHA-512 + clamp internally with `crypto_hash_sha512` and libsodium's
-     scalar clamping. Cleanest and least error-prone.
-  b. Expose `crypto_hash_sha512` as `sxSha512` and do the clamp in OnionXT script. Smaller SodiumXT
-     change, but puts a fiddly clamp in script.
-  c. Defer: only support Tor-generated keys (`NEW:ED25519-V3`) and persist the returned `PrivateKey`.
-     No reproducible-from-seed address, but no upstream dependency.
-- **Recommendation:** land (a) upstream in SodiumXT (small, well-scoped, testable with a known-answer
-  vector), then compose it. Until then, ship deferral (c) so the rest of OnionXT is unblocked.
+  scalar `a` and prefix `RH`), not libsodium's `seed || pubkey` secret key. `sxSignSeedToExpandedKey`
+  yields exactly that, and its public key matches `sxSignKeypairFromSeed(pSeed)`, so the `.onion`
+  address and the app's signing identity stay consistent.
 
-### 2. SHA3-256 (for the v3 onion address checksum)
+### 2. SHA3-256 (for the v3 onion address checksum) - DEFERRED (the only remaining gap)
+
+**Status: DEFERRED.** libsodium has no SHA-3/Keccak, so SodiumXT does not ship `sxSha3_256`, and this
+stays deferred by design. It is only needed to EMIT or offline-VALIDATE an address checksum, which is a
+nicety, not a security dependency: address recovery (base32-decode -> ed25519 pubkey) and connect-time
+authentication (tor verifies the descriptor signature against the key in the address) both work without
+it. `oxAddressFromPublicKey` / `oxIsValidAddress` compose `sxSha3_256` if it ever lands and otherwise
+return a clear capability error / do structural-only validation. Revisit only if offline address
+emit/validate becomes a real need (it would mean bundling non-libsodium crypto into SodiumXT).
 
 - **Needed by:** `oxAddressFromPublicKey` (to emit a correct 2-byte checksum) and `oxIsValidAddress`
   (to validate a pasted address offline). The checksum is `SHA3-256(".onion checksum" || PUBKEY ||
@@ -40,17 +52,17 @@ OnionXT.
   descriptor signature is the real authentication). Add (a) only if offline address emission/validation
   becomes a real need.
 
-### 3. HMAC-SHA256 (for SAFECOOKIE control auth)
+### 3. HMAC-SHA256 (for SAFECOOKIE control auth) - SHIPPED (SodiumXT ABI 6)
+
+**Status: SHIPPED.** SodiumXT ABI 6 provides `sxHmacSha256(pKey as Data, pMessage as Data) returns
+Data` (32-byte MAC). OnionXT's SAFECOOKIE flow (doc 03) composes it directly: verify `SERVERHASH` with
+`sxMemEqual` (constant time), then send the controller-to-server hash. COOKIE auth (plain hex over
+loopback) remains a fine fallback when SAFECOOKIE prerequisites are absent. Known-answer vector
+(RFC 4231 Test Case 2) pinned in `tools/onion-kat.py`.
 
 - **Needed by:** the preferred SAFECOOKIE control-auth method (doc 03), which verifies a server hash
-  and computes a client hash, both HMAC-SHA256 over the cookie and nonces.
-- **Options:**
-  a. Add `sxHmacSha256(pKey, pMsg)` to SodiumXT (libsodium has `crypto_auth_hmacsha256`, so this is a
-     small, natural addition).
-  b. Defer: use COOKIE auth (send the cookie hex) or HASHEDPASSWORD or NULL, none of which need HMAC.
-     Over a loopback control port this is acceptable.
-- **Recommendation:** defer (b) for v1 (COOKIE over loopback is fine), and add (a) upstream when
-  hardening, since SAFECOOKIE avoids sending the cookie in the clear even on loopback.
+  and computes a client hash, both HMAC-SHA256 over the cookie and nonces. The two HMAC key strings are
+  the verbatim Tor control-spec constants; the message is `Cookie || ClientNonce || ServerNonce`.
 
 ## Engine capabilities to confirm (not gaps, but Phase 0 unknowns)
 

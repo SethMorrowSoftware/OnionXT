@@ -491,9 +491,9 @@ private command demoBuildAboutTab
    demoMakeLabel "about:hdr", "20,90,700,114", "OnionXT " & oxVersion(), "text"
    demoMakeLabel "about:blurb", "20,120,740,190", \
       "A Tor transport and self-authenticating rendezvous layer for OXT/LiveCode." & return & \
-      "Adds no cryptography (composes SodiumXT); assumes a locally-running tor" & return & \
-      "daemon. Status: designed and statically reasoned; needs an on-engine pass" & return & \
-      "against a real daemon (CLAUDE.md).", "muted"
+      "Adds no cryptography (composes SodiumXT ABI >= 6 for seed-derived onions and" & return & \
+      "SAFECOOKIE); assumes a locally-running tor daemon. Status: designed and" & return & \
+      "statically reasoned; needs an on-engine pass against a real daemon (CLAUDE.md).", "muted"
    demoMakeLabel "about:capsLbl", "20,198,300,220", "Capabilities (oxTransportInfo):", "text"
    demoMakeOutput "about:caps", "20,224,740,300"
    demoMakeButton "about:runTests", "20,310,220,340", "Run self-test"

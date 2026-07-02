@@ -40,8 +40,10 @@ inbound address), and it is the metadata-privacy upgrade path for the whole secu
 - **It is not Tor, and it does not bundle Tor.** It assumes a tor daemon is reachable on the loopback
   SOCKS and control ports. Launching or bundling a tor binary is an optional convenience layer
   (doc 07), never a requirement, and never a reimplementation of onion routing.
-- **It adds no cryptography.** ed25519 identity, key derivation, and the payload sealing are all
-  SodiumXT calls. OnionXT is a transport and a naming layer, not a cipher.
+- **It adds no cryptography.** ed25519 identity, the deterministic onion-key expansion, SAFECOOKIE
+  HMAC, and the payload sealing are all SodiumXT calls. OnionXT is a transport and a naming layer, not
+  a cipher. It requires **SodiumXT ABI >= 6** for the deterministic-onion and SAFECOOKIE paths (dialing
+  and Tor-generated onions need no SodiumXT at all).
 - **It is not an anonymity guarantee by itself.** Tor defends the network path; it does not defend
   against a global passive adversary doing traffic correlation, against a compromised local daemon,
   or against you connecting to the wrong onion address. See [docs/01-threat-model.md](docs/01-threat-model.md).
@@ -62,7 +64,7 @@ OnionXT/
     05-api-reference.md     the public ox* surface
     06-riptide-integration.md   OnionXT as a Riptide transport
     07-tor-lifecycle.md     assume-running vs launch-a-bundled-binary; bootstrap UX
-    08-capabilities-required.md the small upstream gaps (SodiumXT SHA-512 / ed25519 expansion)
+    08-capabilities-required.md upstream gaps (ed25519 expansion + HMAC shipped in SodiumXT ABI 6; SHA3-256 deferred)
     09-open-questions.md    the honest to-do list
     10-usage-guide.md       from-zero guide for any OXT app that uses OnionXT
   tools/

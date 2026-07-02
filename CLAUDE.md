@@ -67,10 +67,11 @@ OnionXT inherits differently from each sibling. Do not cargo-cult any of them wh
 
 ## The rules that make this safe and correct
 
-1. **Add no cryptography. Compose SodiumXT.** ed25519 identity keys, deterministic onion keys from a
-   seed, and every protected payload byte are SodiumXT calls (`sx*`). There is no OnionXT cipher, KDF,
-   or signature. A missing primitive (SHA-512 for ed25519 key expansion, SHA3-256 for the v3 address
-   checksum) is an upstream SodiumXT feature request (doc 08), never a hand-rolled hash here.
+1. **Add no cryptography. Compose SodiumXT (ABI >= 6).** ed25519 identity keys, the deterministic
+   onion-key expansion (`sxSignSeedToExpandedKey`), SAFECOOKIE HMAC (`sxHmacSha256`), and every
+   protected payload byte are SodiumXT calls (`sx*`). There is no OnionXT cipher, KDF, or signature. A
+   still-missing primitive (SHA3-256 for the offline v3 address checksum, doc 08 gap #2, deferred) is an
+   upstream SodiumXT feature request, never a hand-rolled hash here.
 2. **Trust the onion address, verify the daemon, distrust the network.** A v3 onion address is an
    ed25519 public key (doc 04): connecting to it authenticates the far end for free, so treat the
    address as the contact's identity and pin it. The **local tor daemon is trusted** (it sees your
@@ -318,14 +319,19 @@ Design decisions worth knowing before you touch the code:
   continuation (run when a reply completes) enqueues the next command while the old label is still in
   flight, and `oxCtlLine` then clears the label and drains the queue. `650` event lines are demuxed from
   command replies by their leading status code. `itemDelimiter` is saved and restored around every use.
-- **Crypto is composed, never hand-rolled.** Every `sx*` call goes through `oxTrySodium` /
-  `oxTrySodium2`, which use `dispatch function ... to <callback owner>` and read `it = "unhandled"` to
-  detect an absent primitive, degrading to a clear `"needs SodiumXT sxXxx (docs/08)"` error (or a safe
-  fallback, e.g. SAFECOOKIE -> COOKIE). base32 and the ed25519 scalar clamp are pure byte ops and are
-  the only "math" done in script.
-- **base32 keeps its bit-buffer small.** The accumulator is masked to its pending bits each step so a
-  35-byte address never builds a 280-bit integer (which would lose precision past 2^53). The KAT in
-  `tools/onion-kat.py` pins the answers.
+- **Crypto is composed, never hand-rolled. OnionXT requires SodiumXT ABI >= 6** for the
+  deterministic-onion and SAFECOOKIE paths (the SOCKS dial path, Tor-generated onions, and
+  COOKIE/NULL/HASHEDPASSWORD auth need no SodiumXT). Each `sx*` primitive is called DIRECTLY and wrapped
+  in `try/catch`: an absent handler raises a catchable execution error, so a missing primitive degrades
+  to a clear `"needs SodiumXT sxXxx"` error (or a safe fallback, e.g. SAFECOOKIE -> COOKIE) and the
+  return value comes back unambiguously (this replaced an earlier `dispatch function` approach whose
+  `it`/`the result` semantics were murky). ABI 6 SHIPPED gaps #1 (`sxSignSeedToExpandedKey`) and #3
+  (`sxHmacSha256`); only gap #2 (SHA3-256, offline checksum) stays deferred. base32 and the base64
+  encode are pure byte ops; the ed25519 scalar clamp now lives inside SodiumXT's expansion helper.
+- **base32 keeps its bit-buffer small, and uses no `^`/`div`/`mod`.** The accumulator is masked to its
+  pending bits each step so a 35-byte address never builds a 280-bit integer (precision loss past 2^53).
+  It routes integer division/modulo through `oxIntDiv`/`oxIntMod` and powers through `oxPow2` (some OXT
+  parsers reject `^` in a compound expression). The KAT in `tools/onion-kat.py` pins the answers.
 
 The on-engine `VERIFY:` checklist (settle each against a real engine + tor daemon):
 

@@ -24,8 +24,11 @@ What it pins:
      gotcha). The curve math is the RFC 8032 reference and is self-checked against the
      standard 2*B / 3*B / 5*B multiples on startup, so a broken transcription fails
      loudly instead of pinning a wrong vector.
+  4. The two SodiumXT ABI-6 primitives OnionXT composes, pinned so an implementer can
+     confirm the library and SodiumXT agree: sxSignSeedToExpandedKey (seed = 0x42 x 32)
+     and sxHmacSha256 (RFC 4231 HMAC-SHA256 Test Case 2).
 
-Pure standard library only (hashlib has sha512 and sha3_256; the ed25519 group math
+Pure standard library only (hashlib has sha512/sha3_256/hmac; the ed25519 group math
 is inlined), so it runs anywhere CI runs with no third-party dependency.
 
 Usage:
@@ -34,6 +37,7 @@ Usage:
 """
 
 import hashlib
+import hmac
 import sys
 
 # --------------------------------------------------------------------------- base32
@@ -181,6 +185,18 @@ _BASE_MULTIPLES = {
     3: "d4b4f5784868c3020403246717ec169ff79e26608ea126a1ab69ee77d1b16712",
     5: "edc876d6831fd2105d0b4389ca2e283166469289146e2ce06faefe98b22548df",
 }
+# The two SodiumXT ABI-6 primitives OnionXT composes (docs/08 gaps #1 and #3).
+# sxSignSeedToExpandedKey(seed = 0x42 x 32):
+_EXPANDED_KEY_SEED42 = (
+    "90e7595fc89e52fdfddce9c6a43d74dbf6047025ee0462d2d172e8b6a2841d6ee"
+    "da66ce2983f7ff7e47c49615220e78c25c775a040957316b7bafd5985450f90"
+)
+# sxHmacSha256(key="Jefe", msg="what do ya want for nothing?") = RFC 4231 Test Case 2:
+_HMAC_JEFE = "5bdcc146bf60754e6a042426089575c75a003f089d2739839dec58b964ec3843"
+
+
+def hmac_sha256(key, message):
+    return hmac.new(key, message, hashlib.sha256).digest()
 
 
 def self_check():
@@ -198,6 +214,11 @@ def self_check():
         pub = pubkey_from_address(onion)
         if address_from_pubkey(pub) != onion:
             failures.append(f"address round-trip failed for {onion}")
+    # SodiumXT ABI-6 composition vectors.
+    if expanded_key_from_seed(bytes([0x42]) * 32).hex() != _EXPANDED_KEY_SEED42:
+        failures.append("sxSignSeedToExpandedKey vector (seed 0x42 x 32) mismatch")
+    if hmac_sha256(b"Jefe", b"what do ya want for nothing?").hex() != _HMAC_JEFE:
+        failures.append("sxHmacSha256 RFC 4231 TC2 vector mismatch")
     return failures
 
 
@@ -240,6 +261,13 @@ def main(argv):
         print(f"    pubkey   = {pub.hex()}")
         print(f"    address  = {address_from_pubkey(pub)}")
         print(f"    expanded = {expanded.hex()}")
+
+    print("\n## SodiumXT ABI-6 primitives OnionXT composes (pin these against SodiumXT)")
+    print("#  sxSignSeedToExpandedKey(seed) -- deterministic onion (docs/08 gap #1, SHIPPED)")
+    print(f"  seed=0x42 x 32 -> expanded = {expanded_key_from_seed(bytes([0x42]) * 32).hex()}")
+    print("#  sxHmacSha256(key, msg) -- SAFECOOKIE control auth (docs/08 gap #3, SHIPPED)")
+    print("#  RFC 4231 Test Case 2:")
+    print(f'  key="Jefe" msg="what do ya want for nothing?" -> {hmac_sha256(b"Jefe", b"what do ya want for nothing?").hex()}')
     return 0
 
 

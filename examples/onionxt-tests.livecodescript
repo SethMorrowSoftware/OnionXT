@@ -20,7 +20,10 @@
 --      same known-answer vectors pinned in tools/onion-kat.py;
 --   2. the fail-closed contract on every public command (CLAUDE.md rule 4:
 --      argument validation, "not authenticated yet", unknown-handle misses);
---   3. idempotent teardown (duplicate close/remove/disconnect/shutdown).
+--   3. idempotent teardown (duplicate close/remove/disconnect/shutdown);
+--   4. the two SodiumXT ABI-6 primitives OnionXT composes (sxSignSeedToExpandedKey,
+--      sxHmacSha256) against their pinned vectors - gated on SodiumXT being loaded,
+--      skipped (not failed) otherwise. Needs SodiumXT ABI >= 6, not a tor daemon.
 -- The actual wire handshakes (SOCKS5 dial, control auth, ADD_ONION) are an
 -- on-engine / integration concern: run examples/onionxt-demo.livecodescript or
 -- examples/onion-roundtrip against a real tor daemon for those (see
@@ -64,6 +67,7 @@ function oxSelfTest
    testIdempotentTeardown
    testAddressRoundTrip
    testAddressNegativePaths
+   testSodiumComposition
 
    local tSummary
    put sPass & " passed, " & sFail & " failed" into tSummary
@@ -291,14 +295,62 @@ private command testAddressNegativePaths
 end testAddressNegativePaths
 
 -- ==========================================================================
--- Small local helper (test glue only).
+-- Section 8: the two SodiumXT ABI-6 primitives OnionXT composes, against the
+-- known-answer vectors pinned in tools/onion-kat.py. Gated on availability
+-- (oxTransportInfo): skipped, not failed, when SodiumXT (ABI >= 6) is not loaded.
+-- These call the sx* public handlers directly, confirming the deterministic-onion
+-- (gap #1) and SAFECOOKIE (gap #3) compositions produce the right bytes.
 -- ==========================================================================
 
-private function testZeroSeed
+private command testSodiumComposition
+   oxSection "SodiumXT ABI-6 composition (docs/08 gaps #1, #3)"
+   local tInfo
+   put oxTransportInfo() into tInfo
+
+   -- Gap #1 (SHIPPED): sxSignSeedToExpandedKey(seed = 0x42 x 32), 64-byte result.
+   if tInfo["deterministicOnion"] is true then
+      local tExpanded, tExpectExp
+      put "90e7595fc89e52fdfddce9c6a43d74dbf6047025ee0462d2d172e8b6a2841d6ee" & \
+          "da66ce2983f7ff7e47c49615220e78c25c775a040957316b7bafd5985450f90" into tExpectExp
+      put sxSignSeedToExpandedKey(testRepeatByte(66, 32)) into tExpanded
+      oxCheck (testHex(tExpanded) is tExpectExp), \
+         "sxSignSeedToExpandedKey(seed 0x42 x 32) matches the pinned expanded-key vector"
+   else
+      put sLog & "  --   (skipped: sxSignSeedToExpandedKey needs SodiumXT ABI >= 6)" & return into sLog
+   end if
+
+   -- Gap #3 (SHIPPED): sxHmacSha256("Jefe","what do ya want for nothing?") RFC 4231 TC2.
+   if tInfo["safeCookieAuth"] is true then
+      local tMac, tExpectMac
+      put "5bdcc146bf60754e6a042426089575c75a003f089d2739839dec58b964ec3843" into tExpectMac
+      put sxHmacSha256(textEncode("Jefe", "UTF-8"), textEncode("what do ya want for nothing?", "UTF-8")) into tMac
+      oxCheck (testHex(tMac) is tExpectMac), \
+         "sxHmacSha256 (RFC 4231 Test Case 2) matches the pinned HMAC vector"
+   else
+      put sLog & "  --   (skipped: sxHmacSha256 needs SodiumXT ABI >= 6)" & return into sLog
+   end if
+end testSodiumComposition
+
+-- ==========================================================================
+-- Small local helpers (test glue only).
+-- ==========================================================================
+
+private function testHex pData
+   -- binaryDecode is a function that fills its output var; `get` discards the count.
+   local tHex
+   get binaryDecode("H*", pData, tHex)
+   return tHex
+end testHex
+
+private function testRepeatByte pByteVal, pCount
    local tOut, tI
    put empty into tOut
-   repeat with tI = 1 to 32
-      put numToByte(0) after tOut
+   repeat with tI = 1 to pCount
+      put numToByte(pByteVal) after tOut
    end repeat
    return tOut
+end testRepeatByte
+
+private function testZeroSeed
+   return testRepeatByte(0, 32)
 end testZeroSeed
