@@ -77,7 +77,8 @@ OnionXT/
     check-livecodescript.py the static gate (carried verbatim from the family)
     check-docs-style.py     the prose house-style gate (no dashes / curly quotes)
     onion-kat.py            known-answer vectors: base32, v3 address, ed25519 seed
-    build-standalone.py     bundle the libraries + demo into one paste-and-run stack
+    build-standalone.py     bundle the libraries + an example into paste-and-run stacks
+                            (the file-sharing spike AND the full tabbed demo)
   .github/workflows/ci.yml  the three gates above, on every push / PR
   src/
     onionxt.livecodescript      the transport library (public ox* handlers)
@@ -87,8 +88,10 @@ OnionXT/
     onion-roundtrip/        two instances talk over Tor with no server, sealed by SodiumXT
     onion-httpd/            host a site / a browsable file share over an onion (oxh*),
                             as libraries or one self-building standalone stack
-    onionxt-demo.livecodescript   interactive tabbed showcase: dial through Tor, publish an onion
-                                  (serves a page viewable in Tor Browser), and the address tools
+    onionxt-demo.livecodescript   interactive tabbed showcase: dial through Tor, HOST over an onion
+                                  (serve a page or share a folder, viewable in Tor Browser), address tools
+    onionxt-demo-standalone.livecodescript  the tabbed demo as ONE paste-and-run stack, all deps
+                                  bundled (onionxt + onion-httpd + tests + demo); generated, do not edit
     onionxt-tests.livecodescript  a pure, offline self-test harness (sPass/sFail, KATs)
 ```
 
