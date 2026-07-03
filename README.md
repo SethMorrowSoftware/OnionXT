@@ -11,6 +11,10 @@ embed or ship Tor):
    an ed25519 public key. Connecting to `<56-char-base32>.onion` cryptographically proves you
    reached the holder of that key, with no certificate authority, no DNS, and no key-distribution
    step that a man-in-the-middle can hijack.
+3. **Hosting** - the companion `onion-httpd` layer serves HTTP over an onion (static sites, a
+   browsable file share, or dynamic routes) from an OXT app, with no web server, no hosting, and no
+   port forwarding. See [src/onion-httpd.livecodescript](src/onion-httpd.livecodescript) and
+   [examples/onion-httpd/](examples/onion-httpd/).
 
 ```
    tor daemon (already running: Tor Browser, system tor, or a bundled binary)
@@ -24,6 +28,7 @@ embed or ship Tor):
             |
             +--> composes SodiumXT (sx*) for the payload and for deterministic onion keys
             +--> exposes a pluggable transport seam any app can use (doc 06)
+            +--> onion-httpd (oxh*) serves HTTP on that loop: sites, file shares, routes
 ```
 
 ## Why this matters
@@ -72,12 +77,16 @@ OnionXT/
     check-livecodescript.py the static gate (carried verbatim from the family)
     check-docs-style.py     the prose house-style gate (no dashes / curly quotes)
     onion-kat.py            known-answer vectors: base32, v3 address, ed25519 seed
+    build-standalone.py     bundle the libraries + demo into one paste-and-run stack
   .github/workflows/ci.yml  the three gates above, on every push / PR
   src/
-    onionxt.livecodescript  the library (public ox* handlers, implemented)
+    onionxt.livecodescript      the transport library (public ox* handlers)
+    onion-httpd.livecodescript  the HTTP hosting layer over the accept loop (oxh*)
   examples/
     socks-dial/             dial a host through Tor and read the reply
     onion-roundtrip/        two instances talk over Tor with no server, sealed by SodiumXT
+    onion-httpd/            host a site / a browsable file share over an onion (oxh*),
+                            as libraries or one self-building standalone stack
     onionxt-demo.livecodescript   interactive tabbed showcase: dial through Tor, publish an onion
                                   (serves a page viewable in Tor Browser), and the address tools
     onionxt-tests.livecodescript  a pure, offline self-test harness (sPass/sFail, KATs)
