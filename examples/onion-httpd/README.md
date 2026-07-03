@@ -80,10 +80,9 @@ links resolve, the exact-`Content-Length` response, and the clean close.
 
 ## Status / notes
 
-- Built on OnionXT primitives already confirmed on-engine (the accept loop, the
-  loopback guard, chunked stream delivery, write + clean close). The request
-  parser, router, and directory listing are new livecodescript over those proven
-  blocks and want an on-engine pass.
+- **Confirmed on-engine:** hosting a folder as a browsable file share (with the
+  auto directory listing), a static site, and dynamic routes all render in Tor
+  Browser, both as libraries and as the single standalone stack.
 - **Large files:** a file is read into memory and sent in one response - right for
   documents, images, and modest archives; streaming and HTTP Range (resumable /
   seekable) downloads are a later addition, so multi-GB files are not ideal over
