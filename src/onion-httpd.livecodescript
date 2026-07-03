@@ -26,6 +26,7 @@ constant kOxhCloseDelay = 500     -- ms to let the response flush before closing
 constant kOxhMaxRequest = 262144  -- refuse a request head bigger than 256 KB (abuse guard)
 
 local sOxhRoot        -- static-file root folder, or empty
+local sOxhAutoIndex   -- true: auto-generate a directory-listing page for folders
 local sOxhRoutes      -- array: (METHOD & space & path) -> handler name
 local sOxhReq         -- array: stream handle -> accumulated request bytes
 local sOxhServed      -- array: stream handle -> true once answered
@@ -51,9 +52,21 @@ command oxhServe pVirtualPort, pLocalPort
 end oxhServe
 
 command oxhSetRoot pFolder
-   -- Serve static files from pFolder ("/" maps to /index.html). Empty disables it.
-   put pFolder into sOxhRoot
+   -- Static-site mode: serve files from pFolder ("/" maps to /index.html); a folder
+   -- with no index.html is a 404 (no directory listing - the safe default for a
+   -- site). Empty disables static serving.
+   put oxhStripTrailingSlash(pFolder) into sOxhRoot
+   put false into sOxhAutoIndex
 end oxhSetRoot
+
+command oxhServeFiles pFolder
+   -- File-sharing mode: serve every file under pFolder by path AND auto-generate a
+   -- directory-listing page (names, sizes, download links) for "/" and each
+   -- subfolder, so a visitor can browse and download without you writing an index.
+   -- A folder's own index.html, if present, still takes precedence over the listing.
+   put oxhStripTrailingSlash(pFolder) into sOxhRoot
+   put true into sOxhAutoIndex
+end oxhServeFiles
 
 command oxhRoute pMethod, pPath, pHandler
    -- Register a dynamic route (exact path match in v1). pHandler is a command in
@@ -211,25 +224,91 @@ private command oxhHandle pStream, pData
    oxhSendBytes pStream, 404, textEncode("Not found", "UTF-8"), "Content-Type: text/plain; charset=utf-8"
 end oxhHandle
 
-private command oxhServeStatic pStream, pPath
-   local tPath, tFile, tContent
-   put pPath into tPath
-   if tPath is "/" or tPath is empty then
-      put "/index.html" into tPath
+private command oxhServeStatic pStream, pRawPath
+   local tPath, tFile, tIndex
+   put urlDecode(pRawPath) into tPath        -- %20 etc. -> real chars for disk mapping
+   if tPath is empty then
+      put "/" into tPath
    end if
-   -- Path-traversal guard: refuse any ".." segment before touching the disk.
+   -- Path-traversal guard AFTER decoding (catches %2e%2e), before touching disk.
    if ".." is in tPath then
       oxhSendBytes pStream, 403, textEncode("Forbidden", "UTF-8"), "Content-Type: text/plain; charset=utf-8"
       exit oxhServeStatic
    end if
    put sOxhRoot & tPath into tFile
-   put url ("binfile:" & tFile) into tContent
-   if the result is not empty then
-      oxhSendBytes pStream, 404, textEncode("Not found", "UTF-8"), "Content-Type: text/plain; charset=utf-8"
+   if there is a folder tFile then
+      -- A folder URL must end in "/" so relative links in the listing resolve;
+      -- redirect if it does not (send the browser back with the slash added).
+      if the last char of tPath is not "/" then
+         oxhSendBytes pStream, 301, empty, "Location: " & pRawPath & "/"
+         exit oxhServeStatic
+      end if
+      put tFile & "index.html" into tIndex    -- tFile ends with "/" here
+      if there is a file tIndex then
+         oxhSendFile pStream, tIndex, "index.html"
+      else if sOxhAutoIndex is true then
+         oxhSendBytes pStream, 200, textEncode(oxhListingHtml(tFile, tPath), "UTF-8"), "Content-Type: text/html; charset=utf-8"
+      else
+         oxhSendBytes pStream, 404, textEncode("Not found", "UTF-8"), "Content-Type: text/plain; charset=utf-8"
+      end if
       exit oxhServeStatic
    end if
-   oxhSendBytes pStream, 200, tContent, "Content-Type: " & oxhMimeType(tPath)
+   if there is a file tFile then
+      oxhSendFile pStream, tFile, tPath
+      exit oxhServeStatic
+   end if
+   oxhSendBytes pStream, 404, textEncode("Not found", "UTF-8"), "Content-Type: text/plain; charset=utf-8"
 end oxhServeStatic
+
+private command oxhSendFile pStream, pDiskPath, pForMime
+   -- Read a file as bytes and serve it with a MIME type from pForMime's extension.
+   local tContent
+   put url ("binfile:" & pDiskPath) into tContent
+   if the result is not empty then
+      oxhSendBytes pStream, 404, textEncode("Not found", "UTF-8"), "Content-Type: text/plain; charset=utf-8"
+      exit oxhSendFile
+   end if
+   oxhSendBytes pStream, 200, tContent, "Content-Type: " & oxhMimeType(pForMime)
+end oxhSendFile
+
+private function oxhListingHtml pDiskFolder, pUrlPath
+   -- Build a directory-listing page for pDiskFolder (a disk path ending in "/"),
+   -- served at pUrlPath (a URL path ending in "/"). Names are HTML-escaped (a file
+   -- named "<script>" cannot inject) and path-encoded for the hrefs; links are
+   -- relative to pUrlPath, so a subfolder link browses in and ".." goes up.
+   local tSaved, tSavedID, tDetailed, tFolders, tLine, tName, tSize, tOut
+   put the defaultFolder into tSaved
+   set the defaultFolder to pDiskFolder
+   put the detailedFiles into tDetailed
+   put the folders into tFolders
+   set the defaultFolder to tSaved
+   put "<!doctype html><html><head><meta charset='utf-8'><title>Shared files</title>" into tOut
+   put "<style>body{font-family:system-ui,sans-serif;max-width:44em;margin:2em auto;padding:0 1em}h1{font-size:1.2em}ul{list-style:none;padding:0}li{padding:.3em 0;border-bottom:1px solid #eee}a{text-decoration:none}.sz{color:#888;font-size:.85em;float:right}</style>" after tOut
+   put "</head><body><h1>Shared files: " & oxhHtmlEscape(pUrlPath) & "</h1><ul>" after tOut
+   if pUrlPath is not "/" then
+      put "<li><a href='../'>.. (up)</a></li>" after tOut
+   end if
+   repeat for each line tName in tFolders
+      if tName is "." or tName is ".." then
+         next repeat
+      end if
+      put "<li><a href='" & oxhPathEncode(tName) & "/'>" & oxhHtmlEscape(tName) & "/</a></li>" after tOut
+   end repeat
+   put the itemDelimiter into tSavedID
+   set the itemDelimiter to comma
+   repeat for each line tLine in tDetailed
+      put urlDecode(item 1 of tLine) into tName     -- detailedFiles names are URL-encoded
+      put item 2 of tLine into tSize
+      put "<li><a href='" & oxhPathEncode(tName) & "'>" & oxhHtmlEscape(tName) & "</a>" after tOut
+      if tSize is an integer then
+         put "<span class='sz'>" & oxhHumanSize(tSize) & "</span>" after tOut
+      end if
+      put "</li>" after tOut
+   end repeat
+   set the itemDelimiter to tSavedID
+   put "</ul></body></html>" after tOut
+   return tOut
+end oxhListingHtml
 
 -- ==========================================================================
 -- Response building. The proven demo pattern: exact BYTE Content-Length,
@@ -365,3 +444,50 @@ private function oxhOwnerObject
    end if
    return the topStack
 end oxhOwnerObject
+
+private function oxhStripTrailingSlash pFolder
+   local tOut
+   put pFolder into tOut
+   if tOut is not empty and (the last char of tOut is "/" or the last char of tOut is "\") then
+      delete the last char of tOut
+   end if
+   return tOut
+end oxhStripTrailingSlash
+
+private function oxhPathEncode pName
+   -- Encode a name for a URL PATH segment. urlEncode uses "+" for space (form
+   -- style); a path wants "%20", so fix that up.
+   local tEnc
+   put urlEncode(pName) into tEnc
+   replace "+" with "%20" in tEnc
+   return tEnc
+end oxhPathEncode
+
+private function oxhHtmlEscape pText
+   -- Escape a value for HTML text/attribute context so a crafted file name cannot
+   -- inject markup. `&` first, then the rest.
+   local tOut
+   put pText into tOut
+   replace "&" with "&amp;" in tOut
+   replace "<" with "&lt;" in tOut
+   replace ">" with "&gt;" in tOut
+   replace quote with "&quot;" in tOut
+   return tOut
+end oxhHtmlEscape
+
+private function oxhHumanSize pBytes
+   local tK, tM, tG
+   if pBytes < 1024 then
+      return pBytes & " B"
+   end if
+   put pBytes / 1024 into tK
+   if tK < 1024 then
+      return round(tK, 1) & " KB"
+   end if
+   put tK / 1024 into tM
+   if tM < 1024 then
+      return round(tM, 1) & " MB"
+   end if
+   put tM / 1024 into tG
+   return round(tG, 1) & " GB"
+end oxhHumanSize

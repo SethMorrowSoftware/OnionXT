@@ -1,70 +1,77 @@
-# Hosting HTTP onion services in OpenXTalk
+# Hosting onion services in OpenXTalk (files, sites, apps)
 
-A working, self-contained example of hosting Tor onion services from an OXT app.
-It serves HTTP over an onion using **OnionXT's own accept loop** via the
-`src/onion-httpd.livecodescript` module (`oxh*`). It depends on nothing but
-OnionXT and that module - no engine-shipped HTTPD Library (which is not present on
-every OpenXTalk build), so it runs wherever OnionXT runs.
+Host Tor onion services from an OXT app, with no web server, no hosting, and no
+port forwarding. It serves HTTP over an onion using **OnionXT's own accept loop**
+via the `src/onion-httpd.livecodescript` module (`oxh*`) - it depends on nothing
+but OnionXT and that module (no engine-shipped HTTPD Library), so it runs wherever
+OnionXT runs.
 
 ```
 Tor  --(onion:80)-->  OnionXT accept loop (loopback-guarded, proven)
                           |  onPeer / onStreamData
                       onion-httpd (oxh*)  <- parses the request, routes it, replies
                           |
-                      your route handlers  /  a folder of static files
+                      a shared folder  /  your route handlers  /  a static site
 ```
 
-## What the module gives you (`oxh*`)
+## Share a folder of files (the file-sharing use case)
+
+One call turns a folder into a private, anonymous file-share:
+
+```
+oxhServeFiles "/full/path/to/a/folder"
+```
+
+Then, at the onion address, a visitor gets an **auto-generated directory-listing
+page** (file names, human-readable sizes, download links) and can **browse into
+subfolders**. You do not write any HTML. Every file is served at its path with the
+right MIME type (images preview, PDFs open, everything else downloads), file names
+are HTML-escaped so a crafted name cannot inject markup, and `..` traversal is
+refused. If a folder happens to contain its own `index.html`, that is served
+instead of the listing.
+
+`spike.livecodescript` is exactly this: click **Start**, then **Share Folder**,
+pick a folder, and open the printed `http://<address>.onion/` in Tor Browser.
+
+## The rest of the `oxh*` API
 
 | call | does |
 |---|---|
-| `oxhInit the long id of me` | tells the module where your route handlers live |
-| `oxhServe pVirtualPort, pLocalPort` | publishes an onion and serves HTTP on it (returns the service handle) |
-| `oxhRoute pMethod, pPath, pHandler` | registers a dynamic route; the handler is `pHandler pStream, pRequest` |
-| `oxhSetRoot pFolder` | serves static files from a folder (`/` maps to `/index.html`, with MIME types and a path-traversal guard) |
-| `oxhReply pStream, pCode, pBodyText, pHeaders` | sends a response from a route handler |
-| `oxhStop pService` | tears the onion down |
+| `oxhInit the long id of me` | where your route handlers live |
+| `oxhServe pVirtualPort, pLocalPort` | publish an onion and serve HTTP on it (returns the handle) |
+| `oxhServeFiles pFolder` | share a folder: files + an auto directory listing |
+| `oxhSetRoot pFolder` | static-site mode: serve files, `/` -> `index.html`, no listing (safe default) |
+| `oxhRoute pMethod, pPath, pHandler` | a dynamic route; handler is `pHandler pStream, pRequest` |
+| `oxhReply pStream, pCode, pBodyText, pHeaders` | reply from a route handler |
+| `oxhStop pService` | tear the onion down |
 
-A request array carries `__method`, `__path`, `__query`, `__body`, and the request
-headers (lowercased). The module handles request framing (buffering until the
-head and any `Content-Length` body have arrived), the exact-`Content-Length`
-response, and the clean close.
+A request array carries `__method`, `__path`, `__query`, `__body`, and the
+lowercased request headers. The module handles request framing (buffer until the
+head and any `Content-Length` body arrive), a folder-URL redirect so relative
+links resolve, the exact-`Content-Length` response, and the clean close.
 
 ## How to run
 
-1. Make a new mainstack, set its stack script to `spike.livecodescript`.
+1. New mainstack, stack script = `spike.livecodescript`.
 2. Put **both** `src/onionxt.livecodescript` and `src/onion-httpd.livecodescript`
-   in the message path (`start using` them as libraries).
-3. Have a tor daemon with the **control port enabled** (see the OnionXT README
-   Troubleshooting section: `ControlPort 9051` + `CookieAuthentication 1`).
-4. Click **Start**, wait for `REACHABLE`, then open the printed
-   `http://<address>.onion/` in **Tor Browser** and click between the two pages.
-
-## Serving a static site instead
-
-Drop this into `preOpenStack` (in place of, or besides, the routes):
-
-```
-oxhSetRoot "/full/path/to/your/site"
-```
-
-and every file under that folder is served by path, with `index.html` as the
-default document. That is a complete static site, hosted anonymously, from your
-own machine.
+   in the message path (`start using` them).
+3. tor with the **control port enabled** (OnionXT README Troubleshooting).
+4. **Start**, then **Share Folder**, then open the `.onion` in **Tor Browser**.
 
 ## Status / notes
 
-- Built entirely on OnionXT primitives that are already confirmed on-engine (the
-  accept loop, the loopback guard, chunked stream delivery, the write + clean
-  close). The request parser and router are new livecodescript and want an
-  on-engine pass, but they lean only on those proven building blocks.
+- Built on OnionXT primitives already confirmed on-engine (the accept loop, the
+  loopback guard, chunked stream delivery, write + clean close). The request
+  parser, router, and directory listing are new livecodescript over those proven
+  blocks and want an on-engine pass.
+- **Large files:** a file is read into memory and sent in one response - right for
+  documents, images, and modest archives; streaming and HTTP Range (resumable /
+  seekable) downloads are a later addition, so multi-GB files are not ideal over
+  Tor yet.
+- **Receiving files (upload)** is a separate feature: the module parses POST bodies
+  (`__body`), but a real upload endpoint needs a multipart route handler that
+  writes to disk - straightforward to add when you want two-way transfer.
 - Single-threaded and blocking, like OnionXT itself: right for a lightweight
-  self-hosting appliance (sites, forms, small apps, file drops), not a
-  high-traffic server.
-- If the local forward port (8090) reports `cannot listen ...`, it is reserved or
-  in use; change `kLocalPort` to a free one (same Windows reserved-port note as
-  the main demo).
-- A note on the earlier `httpdStart` approach: LiveCode's built-in HTTPD Library
-  is not loaded on this OXT engine, so this module replaces it with a small parser
-  over OnionXT's accept loop. If you ever want a routing framework instead,
-  [lchttpd](https://github.com/toddgeist/lchttpd) (MIT) is a pure-script drop-in.
+  self-hosting appliance, not a high-traffic server.
+- If the local forward port (8090) reports `cannot listen ...`, change `kLocalPort`
+  to a free one (same Windows reserved-port note as the main demo).
