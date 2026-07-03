@@ -113,20 +113,28 @@ on onStatus pKind, pInfo
 end onStatus
 
 private command spikePublish
-   local tErr
+   local tErr, tCaught
    -- Start LiveCode's built-in HTTPD Library on the loopback port. It owns the
    -- accept loop, parses each request, and hands us (socket id, request array).
-   httpdStart kSpikeLocalPort, "onHttpRequest"
-   put the result into tErr
-   if tErr is not empty then
-      spikeLog "httpdStart error: " & tErr
+   --
+   -- IMPORTANT: this runs from onStatus, which OnionXT dispatches inside a try that
+   -- SWALLOWS callback errors. So wrap httpdStart ourselves, or a "handler not
+   -- found" (the built-in HTTPD Library absent in this OXT build) vanishes silently
+   -- and you just never see a .onion. Surface it.
+   try
+      httpdStart kSpikeLocalPort, "onHttpRequest"
+      put the result into tErr
+      put true into sHttpdStarted
+      spikeLog "httpdStart ok on 127.0.0.1:" & kSpikeLocalPort & "  (the result = [" & tErr & "])"
+   catch tCaught
+      spikeLog "httpdStart RAISED: " & tCaught
+      spikeLog "The built-in HTTPD Library is not available on this engine (README unknown A)."
+      spikeLog "Next: use the lchttpd fallback, or serve via OnionXT's own accept loop."
       exit spikePublish
-   end if
-   put true into sHttpdStarted
-   spikeLog "HTTPD Library started on 127.0.0.1:" & kSpikeLocalPort
-   -- VERIFY (B): confirm httpd actually bound kSpikeLocalPort and did not fall back
-   -- to an ephemeral port. If the library reports a different bound port, publish
-   -- THAT value instead of kSpikeLocalPort.
+   end try
+   -- VERIFY (B): the result above should reveal the port httpd bound. If it did NOT
+   -- bind kSpikeLocalPort (it can fall back to an ephemeral port when that port is
+   -- busy/reserved), publish THAT port instead of kSpikeLocalPort.
    oxPublishService kSpikeVirtualPort, kSpikeLocalPort
    put the result into sSvcHandle
    if sSvcHandle is an integer then
