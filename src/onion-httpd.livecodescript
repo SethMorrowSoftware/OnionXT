@@ -1,0 +1,367 @@
+-- onion-httpd.livecodescript - a small, self-contained HTTP/1.1 server for Tor
+-- onion services, built ENTIRELY on OnionXT's accept loop (oxCreateService).
+--
+-- WHY this instead of the engine's HTTPD Library: LiveCode's built-in HTTPD
+-- Library is not present on every OpenXTalk engine (httpdStart raised "handler
+-- not found" on-engine). This module needs nothing but OnionXT, which already
+-- owns the socket, enforces loopback, and streams inbound bytes - the path the
+-- main demo proved works. So it runs wherever OnionXT runs.
+--
+-- USAGE (in an app that has `start using` onionxt.livecodescript AND this file):
+--   oxSetCallbackOwner the long id of me     -- your stack owns onStatus + routes
+--   oxSetStatusCallback "onStatus"
+--   oxhInit the long id of me                -- where your route handlers live
+--   oxhSetRoot "/path/to/site"               -- optional: serve static files
+--   oxhRoute "GET", "/hello", "myHello"      -- optional: a dynamic route
+--   ... oxConnectControl, and when authenticated:
+--   oxhServe 80, 8090                         -- publish an onion + serve HTTP on it
+-- A route handler:  command myHello pStream, pRequest ; oxhReply pStream, 200, "hi",
+--   "Content-Type: text/plain" ; end myHello
+--
+-- Public API: oxhInit / oxhServe / oxhSetRoot / oxhRoute / oxhReply / oxhStop.
+-- It composes OnionXT (ox*); it adds no cryptography and owns no long-lived socket
+-- of its own (OnionXT does). Public API `oxhCamelCase`, matching the family style.
+
+constant kOxhCloseDelay = 500     -- ms to let the response flush before closing
+constant kOxhMaxRequest = 262144  -- refuse a request head bigger than 256 KB (abuse guard)
+
+local sOxhRoot        -- static-file root folder, or empty
+local sOxhRoutes      -- array: (METHOD & space & path) -> handler name
+local sOxhReq         -- array: stream handle -> accumulated request bytes
+local sOxhServed      -- array: stream handle -> true once answered
+local sOxhOwner       -- object whose script holds the route handlers
+
+-- ==========================================================================
+-- Public API
+-- ==========================================================================
+
+command oxhInit pOwner
+   -- Remember where the app's route handlers live (default: the topStack).
+   put pOwner into sOxhOwner
+end oxhInit
+
+command oxhServe pVirtualPort, pLocalPort
+   -- Publish an onion and serve HTTP on it via OnionXT's accept loop (OnionXT owns
+   -- the socket and rejects non-loopback peers - the proven path). Point OnionXT's
+   -- peer callback at this module first, then create the service. Reports the
+   -- service handle through `the result` (an integer on success).
+   oxSetPeerCallback "oxhPeer"
+   oxCreateService pVirtualPort, pLocalPort
+   return the result
+end oxhServe
+
+command oxhSetRoot pFolder
+   -- Serve static files from pFolder ("/" maps to /index.html). Empty disables it.
+   put pFolder into sOxhRoot
+end oxhSetRoot
+
+command oxhRoute pMethod, pPath, pHandler
+   -- Register a dynamic route (exact path match in v1). pHandler is a command in
+   -- the owner's script, called as: pHandler pStream, pRequest.
+   put pHandler into sOxhRoutes[toUpper(pMethod) & space & pPath]
+end oxhRoute
+
+command oxhStop pService
+   -- Tear down one served onion (DEL_ONION + stop OnionXT's listener).
+   oxRemoveService pService
+end oxhStop
+
+command oxhReply pStream, pCode, pBodyText, pHeaders
+   -- Send a text response (HTML, JSON, plain) from a route handler. pBodyText is
+   -- TEXT; it is UTF-8 encoded and its exact byte length becomes Content-Length.
+   oxhSendBytes pStream, pCode, textEncode(pBodyText, "UTF-8"), pHeaders
+end oxhReply
+
+-- ==========================================================================
+-- OnionXT callbacks (public: reached through the message path). OnionXT has
+-- already enforced loopback before oxhPeer fires.
+-- ==========================================================================
+
+command oxhPeer pStream, pService, pPeerAddr
+   oxSetStreamCallback pStream, "oxhStream"
+   put empty into sOxhReq[pStream]
+   put false into sOxhServed[pStream]
+end oxhPeer
+
+command oxhStream pStream, pEvent, pData
+   if pEvent is "data" then
+      if sOxhServed[pStream] is true then
+         exit oxhStream           -- already answered; ignore the rest of the request
+      end if
+      put pData after sOxhReq[pStream]
+      if the number of bytes of sOxhReq[pStream] > kOxhMaxRequest then
+         put true into sOxhServed[pStream]
+         oxhSendBytes pStream, 413, textEncode("Request too large", "UTF-8"), "Content-Type: text/plain"
+         exit oxhStream
+      end if
+      if oxhRequestComplete(sOxhReq[pStream]) then
+         put true into sOxhServed[pStream]
+         oxhHandle pStream, sOxhReq[pStream]
+         delete variable sOxhReq[pStream]
+      end if
+   else if pEvent is "closed" or pEvent is "error" then
+      delete variable sOxhReq[pStream]
+      delete variable sOxhServed[pStream]
+   end if
+end oxhStream
+
+-- ==========================================================================
+-- Request framing and parsing. Byte discipline on the raw request; text ops only
+-- on the decoded (ASCII) header block.
+-- ==========================================================================
+
+private function oxhHeaderEnd pData
+   -- 1-indexed byte position of the first CR of the CRLFCRLF that ends the header
+   -- block, or 0 if not present yet. No char/line on binary (gotcha): scan bytes.
+   -- Bytes go into locals so the match is a single-line `if` (the static gate does
+   -- not join `\` continuations, and a long condition would look unbalanced).
+   local tN, tI, tB1, tB2, tB3, tB4
+   put the number of bytes of pData into tN
+   if tN < 4 then
+      return 0
+   end if
+   repeat with tI = 1 to tN - 3
+      put byteToNum(byte tI of pData) into tB1
+      if tB1 is 13 then
+         put byteToNum(byte (tI + 1) of pData) into tB2
+         put byteToNum(byte (tI + 2) of pData) into tB3
+         put byteToNum(byte (tI + 3) of pData) into tB4
+         if tB2 is 10 and tB3 is 13 and tB4 is 10 then
+            return tI
+         end if
+      end if
+   end repeat
+   return 0
+end oxhHeaderEnd
+
+private function oxhRequestComplete pData
+   local tHeadEnd, tHeaders, tContentLen, tBodyStart, tHave
+   put oxhHeaderEnd(pData) into tHeadEnd
+   if tHeadEnd is 0 then
+      return false             -- headers not fully received yet
+   end if
+   put oxhParseHeaders(byte 1 to (tHeadEnd - 1) of pData) into tHeaders
+   put tHeaders["content-length"] into tContentLen
+   if tContentLen is empty or tContentLen is not an integer then
+      return true              -- no declared body (typical GET)
+   end if
+   put tHeadEnd + 4 into tBodyStart
+   put (the number of bytes of pData) - tBodyStart + 1 into tHave
+   return (tHave >= tContentLen)
+end oxhRequestComplete
+
+private function oxhParseHeaders pHeaderBytes
+   -- pHeaderBytes is the ASCII header block (request line + header lines, no body).
+   -- Returns an array: lowercased header names -> values, plus __method / __path /
+   -- __query / __resource from the request line. Save and restore the delimiters.
+   local tText, tSavedLD, tSavedID, tReqLine, tRes, tI, tLine, tColon, tName, tValue, tOut
+   put textDecode(pHeaderBytes, "UTF-8") into tText     -- headers are ASCII
+   put the lineDelimiter into tSavedLD
+   put the itemDelimiter into tSavedID
+   set the lineDelimiter to (numToChar(13) & numToChar(10))
+   put line 1 of tText into tReqLine
+   put word 1 of tReqLine into tOut["__method"]
+   put word 2 of tReqLine into tOut["__resource"]
+   set the itemDelimiter to "?"
+   put item 1 of tOut["__resource"] into tOut["__path"]
+   if the number of items of tOut["__resource"] > 1 then
+      put item 2 to -1 of tOut["__resource"] into tOut["__query"]
+   end if
+   repeat with tI = 2 to the number of lines of tText
+      put line tI of tText into tLine
+      if tLine is empty then
+         next repeat
+      end if
+      put offset(":", tLine) into tColon
+      if tColon > 1 then
+         put toLower(oxhTrim(char 1 to (tColon - 1) of tLine)) into tName
+         put oxhTrim(char (tColon + 1) to -1 of tLine) into tValue
+         put tValue into tOut[tName]
+      end if
+   end repeat
+   set the lineDelimiter to tSavedLD
+   set the itemDelimiter to tSavedID
+   return tOut
+end oxhParseHeaders
+
+-- ==========================================================================
+-- Routing: a registered route, else a static file, else 404.
+-- ==========================================================================
+
+private command oxhHandle pStream, pData
+   local tHeadEnd, tHeaders, tKey, tBodyStart
+   put oxhHeaderEnd(pData) into tHeadEnd
+   put oxhParseHeaders(byte 1 to (tHeadEnd - 1) of pData) into tHeaders
+   -- Attach the raw body bytes for a POST handler that wants them.
+   put tHeadEnd + 4 into tBodyStart
+   if (the number of bytes of pData) >= tBodyStart then
+      put byte tBodyStart to -1 of pData into tHeaders["__body"]
+   else
+      put empty into tHeaders["__body"]
+   end if
+   put toUpper(tHeaders["__method"]) & space & tHeaders["__path"] into tKey
+   if sOxhRoutes[tKey] is not empty then
+      dispatch sOxhRoutes[tKey] to oxhOwnerObject() with pStream, tHeaders
+      exit oxhHandle
+   end if
+   if sOxhRoot is not empty and tHeaders["__method"] is "GET" then
+      oxhServeStatic pStream, tHeaders["__path"]
+      exit oxhHandle
+   end if
+   oxhSendBytes pStream, 404, textEncode("Not found", "UTF-8"), "Content-Type: text/plain; charset=utf-8"
+end oxhHandle
+
+private command oxhServeStatic pStream, pPath
+   local tPath, tFile, tContent
+   put pPath into tPath
+   if tPath is "/" or tPath is empty then
+      put "/index.html" into tPath
+   end if
+   -- Path-traversal guard: refuse any ".." segment before touching the disk.
+   if ".." is in tPath then
+      oxhSendBytes pStream, 403, textEncode("Forbidden", "UTF-8"), "Content-Type: text/plain; charset=utf-8"
+      exit oxhServeStatic
+   end if
+   put sOxhRoot & tPath into tFile
+   put url ("binfile:" & tFile) into tContent
+   if the result is not empty then
+      oxhSendBytes pStream, 404, textEncode("Not found", "UTF-8"), "Content-Type: text/plain; charset=utf-8"
+      exit oxhServeStatic
+   end if
+   oxhSendBytes pStream, 200, tContent, "Content-Type: " & oxhMimeType(tPath)
+end oxhServeStatic
+
+-- ==========================================================================
+-- Response building. The proven demo pattern: exact BYTE Content-Length,
+-- Connection: close, then a delayed close so the write flushes cleanly.
+-- ==========================================================================
+
+private command oxhSendBytes pStream, pCode, pBodyBytes, pHeaders
+   local tCrlf, tResp
+   put (numToChar(13) & numToChar(10)) into tCrlf
+   put "HTTP/1.1 " & pCode & space & oxhReason(pCode) & tCrlf into tResp
+   if pHeaders is not empty then
+      put oxhNormalizeHeaders(pHeaders) after tResp
+   end if
+   put "Content-Length: " & (the number of bytes of pBodyBytes) & tCrlf after tResp
+   put "Connection: close" & tCrlf after tResp
+   put tCrlf after tResp
+   oxWrite pStream, (textEncode(tResp, "UTF-8") & pBodyBytes)
+   send ("oxhClose " & pStream) to me in kOxhCloseDelay milliseconds
+end oxhSendBytes
+
+command oxhClose pStream
+   -- Deferred, idempotent close of a served connection (public: reached via send).
+   oxCloseStream pStream
+   delete variable sOxhServed[pStream]
+end oxhClose
+
+private function oxhNormalizeHeaders pHeaders
+   -- Turn caller headers ("Name: value", LF- or CRLF-separated) into CRLF lines,
+   -- dropping any Content-Length / Connection (this module sets those).
+   local tCrlf, tSaved, tI, tLine, tOut, tLow
+   put (numToChar(13) & numToChar(10)) into tCrlf
+   put the lineDelimiter into tSaved
+   set the lineDelimiter to lf
+   put empty into tOut
+   repeat with tI = 1 to the number of lines of pHeaders
+      put line tI of pHeaders into tLine
+      if the last char of tLine is (numToChar(13)) then
+         delete the last char of tLine   -- tolerate CRLF-separated input
+      end if
+      if tLine is empty then
+         next repeat
+      end if
+      put toLower(tLine) into tLow
+      if tLow begins with "content-length" or tLow begins with "connection" then
+         next repeat
+      end if
+      put tLine & tCrlf after tOut
+   end repeat
+   set the lineDelimiter to tSaved
+   return tOut
+end oxhNormalizeHeaders
+
+-- ==========================================================================
+-- Small helpers.
+-- ==========================================================================
+
+private function oxhMimeType pPath
+   local tSaved, tExtn
+   put the itemDelimiter into tSaved
+   set the itemDelimiter to "."
+   put toLower(the last item of pPath) into tExtn
+   set the itemDelimiter to tSaved
+   if tExtn is "html" or tExtn is "htm" then
+      return "text/html; charset=utf-8"
+   else if tExtn is "css" then
+      return "text/css; charset=utf-8"
+   else if tExtn is "js" then
+      return "application/javascript; charset=utf-8"
+   else if tExtn is "json" then
+      return "application/json; charset=utf-8"
+   else if tExtn is "txt" then
+      return "text/plain; charset=utf-8"
+   else if tExtn is "png" then
+      return "image/png"
+   else if tExtn is "jpg" or tExtn is "jpeg" then
+      return "image/jpeg"
+   else if tExtn is "gif" then
+      return "image/gif"
+   else if tExtn is "svg" then
+      return "image/svg+xml"
+   else if tExtn is "ico" then
+      return "image/x-icon"
+   else if tExtn is "wasm" then
+      return "application/wasm"
+   else if tExtn is "pdf" then
+      return "application/pdf"
+   end if
+   return "application/octet-stream"
+end oxhMimeType
+
+private function oxhReason pCode
+   if pCode is 200 then
+      return "OK"
+   else if pCode is 204 then
+      return "No Content"
+   else if pCode is 301 then
+      return "Moved Permanently"
+   else if pCode is 302 then
+      return "Found"
+   else if pCode is 400 then
+      return "Bad Request"
+   else if pCode is 403 then
+      return "Forbidden"
+   else if pCode is 404 then
+      return "Not Found"
+   else if pCode is 405 then
+      return "Method Not Allowed"
+   else if pCode is 413 then
+      return "Payload Too Large"
+   else if pCode is 500 then
+      return "Internal Server Error"
+   end if
+   return "OK"
+end oxhReason
+
+private function oxhTrim pText
+   -- Strip leading/trailing spaces and tabs. Guard the empty-string-is-in trap.
+   local tOut, tTab
+   put pText into tOut
+   put numToChar(9) into tTab
+   repeat while tOut is not empty and (the first char of tOut is space or the first char of tOut is tTab)
+      delete the first char of tOut
+   end repeat
+   repeat while tOut is not empty and (the last char of tOut is space or the last char of tOut is tTab)
+      delete the last char of tOut
+   end repeat
+   return tOut
+end oxhTrim
+
+private function oxhOwnerObject
+   if sOxhOwner is not empty then
+      return sOxhOwner
+   end if
+   return the topStack
+end oxhOwnerObject

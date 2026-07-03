@@ -1,223 +1,165 @@
--- spike.livecodescript - de-risking spike: LiveCode's built-in HTTPD Library,
--- published as a Tor onion service by OnionXT.
+-- spike.livecodescript - host onion services in OpenXTalk, self-contained.
 --
--- WHAT THIS PROVES (the one test that de-risks the onion-hosting platform):
---   1. LiveCode's built-in HTTPD Library can own the loopback socket and parse
---      HTTP requests, while OnionXT publishes an onion that forwards to it. So we
---      REUSE a mature request/response engine instead of writing our own.
---   2. oxPublishService (publish-only: ADD_ONION with NO OnionXT accept loop)
---      composes cleanly with an external server.
---   3. The loopback guard holds when the app, not OnionXT, owns the accept: a
---      Tor-forwarded visitor (from 127.0.0.1) is served; a routable LAN peer is
---      rejected before any response.
+-- This is the WORKING path: it serves HTTP over a Tor onion using OnionXT's own
+-- accept loop via the onion-httpd.livecodescript module (oxh*). It needs NOTHING
+-- but OnionXT + this module - no engine-shipped HTTPD Library (which is not
+-- present on every OXT build). It publishes an onion and serves two routes, to
+-- show how easily an app hosts a variety of content.
 --
--- HOW TO RUN: make a new mainstack, set its stack script to this file, put
--- onionxt.livecodescript in the message path (start using it as a library), and
--- have a tor daemon with the control port enabled (see the OnionXT README
--- Troubleshooting section). Click Start, wait for "reachable", then open the
--- printed http://<address>.onion/ in Tor Browser.
---
--- ON-ENGINE UNKNOWNS this spike exists to settle (flagged VERIFY: below):
---   A. Is the built-in HTTPD Library present in OpenXTalk? (It shipped in the
---      open-source LiveCode 9 that OXT forked from, so probably yes.) If not,
---      swap in lchttpd (MIT), which has the same accept + callback shape.
---   B. Does httpdStart bind the port we ask for, or fall back to an ephemeral
---      port when it is busy/reserved? We need the ACTUAL bound port to publish.
---   C. Does the HTTPD Library tolerate the app `close socket`-ing a peer it owns
---      (our loopback-reject path)?
+-- HOW TO RUN: make a new mainstack, set its stack script to this file, and put
+-- BOTH src/onionxt.livecodescript AND src/onion-httpd.livecodescript in the
+-- message path (start using them as libraries). Have a tor daemon with the
+-- control port enabled (OnionXT README Troubleshooting). Click Start, wait for
+-- "REACHABLE", then open the printed http://<address>.onion/ in Tor Browser and
+-- click around.
 
-constant kSpikeVirtualPort = 80      -- the onion's public port (so the URL needs no :port)
-constant kSpikeLocalPort = 8090      -- loopback port the HTTPD Library binds (8080 is often reserved)
-constant kSpikeControlPort = 9051    -- system tor control port (Tor Browser: 9151, and enable it)
-constant kSpikeSocksPort = 9050
+constant kVirtualPort = 80       -- the onion's public port (URL needs no :port)
+constant kLocalPort = 8090       -- loopback forward port (8080 is often reserved)
+constant kControlPort = 9051     -- system tor control port (Tor Browser: 9151)
+constant kSocksPort = 9050
 
-local sSvcHandle        -- OnionXT service handle, or empty
-local sHttpdStarted     -- true once httpdStart succeeded
-local sOnionAddress     -- the <56>.onion once ADD_ONION replies
+local sSvcHandle
+local sOnionAddress
 
 on preOpenStack
    set the width of this stack to 660
    set the height of this stack to 420
    oxSetCallbackOwner the long id of me
    oxSetStatusCallback "onStatus"
-   spikeBuildUI
+   oxhInit the long id of me                    -- route handlers live in this stack
+   oxhRoute "GET", "/", "pageHome"
+   oxhRoute "GET", "/about", "pageAbout"
+   -- To serve a folder of static files instead of (or besides) routes:
+   --   oxhSetRoot "/full/path/to/your/site"
+   demoBuildUI
    pass preOpenStack
 end preOpenStack
 
-private command spikeBuildUI
-   create button "spike:start"
-   set the rect of button "spike:start" to "24,20,164,52"
-   set the label of button "spike:start" to "Start"
-   create button "spike:stop"
-   set the rect of button "spike:stop" to "176,20,316,52"
-   set the label of button "spike:stop" to "Stop"
-   create field "spike:url"
-   set the rect of field "spike:url" to "24,64,636,90"
-   set the lockText of field "spike:url" to true
-   set the opaque of field "spike:url" to true
-   set the textFont of field "spike:url" to "Courier"
-   set the dontWrap of field "spike:url" to true
-   put "(the .onion URL will appear here once published)" into field "spike:url"
-   create field "spike:out"
-   set the rect of field "spike:out" to "24,102,636,396"
-   set the lockText of field "spike:out" to true
-   set the opaque of field "spike:out" to true
-   set the textFont of field "spike:out" to "Courier"
-   set the vScrollbar of field "spike:out" to true
-   put empty into field "spike:out"
-end spikeBuildUI
+-- Route handlers: (stream, request array). Reply with oxhReply.
+command pageHome pStream, pRequest
+   oxhReply pStream, 200, homeHtml(), "Content-Type: text/html; charset=utf-8"
+   demoLog "served GET / to " & pStream
+end pageHome
+
+command pageAbout pStream, pRequest
+   oxhReply pStream, 200, aboutHtml(), "Content-Type: text/html; charset=utf-8"
+   demoLog "served GET /about to " & pStream
+end pageAbout
+
+-- Control lifecycle: connect, then publish + serve once authenticated.
+on onStatus pKind, pInfo
+   if pKind is "control" then
+      if pInfo is "authenticated" then
+         demoLog "control authenticated; publishing the onion and serving HTTP"
+         oxhServe kVirtualPort, kLocalPort
+         put the result into sSvcHandle
+         if sSvcHandle is an integer then
+            demoLog "serving (onion port " & kVirtualPort & " -> 127.0.0.1:" & kLocalPort & ") ..."
+         else
+            demoLog "serve failed: " & sSvcHandle
+         end if
+      else if pInfo begins with "authfailed" or pInfo begins with "error" then
+         demoLog "control error: " & pInfo
+      else
+         demoLog "control: " & pInfo
+      end if
+   else if pKind is "service" then
+      put pInfo into sOnionAddress
+      put "http://" & pInfo & "/" into field "demo:url"
+      demoLog "onion address: " & pInfo
+   else if pKind is "serviceReady" then
+      demoLog "REACHABLE - open  http://" & sOnionAddress & "/  in Tor Browser now"
+   end if
+end onStatus
+
+private function homeHtml
+   local tH
+   put "<!doctype html>" & return into tH
+   put "<html><head><meta charset='utf-8'><title>Hosted in OpenXTalk</title></head>" & return after tH
+   put "<body style='font-family:system-ui,sans-serif;max-width:38em;margin:3em auto;padding:0 1em;line-height:1.5'>" & return after tH
+   put "<h1>Hosted in OpenXTalk, over Tor.</h1>" & return after tH
+   put "<p>This onion service runs entirely inside an OXT app: <strong>OnionXT</strong> provides the address and the tor forwarding, and <strong>onion-httpd</strong> parses the request and serves this page - no web server, no hosting, no port forwarding.</p>" & return after tH
+   put "<p><a href='/about'>About this demo</a></p>" & return after tH
+   put "</body></html>" & return after tH
+   return tH
+end homeHtml
+
+private function aboutHtml
+   local tH
+   put "<!doctype html>" & return into tH
+   put "<html><head><meta charset='utf-8'><title>About</title></head>" & return after tH
+   put "<body style='font-family:system-ui,sans-serif;max-width:38em;margin:3em auto;padding:0 1em;line-height:1.5'>" & return after tH
+   put "<h1>About</h1>" & return after tH
+   put "<p>Two routes (<code>/</code> and <code>/about</code>) served from one small OXT stack. Add more with oxhRoute, or serve a folder of files with oxhSetRoot. The address is an ed25519 public key, so reaching it proves you connected to this host - no certificate authority.</p>" & return after tH
+   put "<p><a href='/'>Back home</a></p>" & return after tH
+   put "</body></html>" & return after tH
+   return tH
+end aboutHtml
+
+-- Minimal UI + lifecycle.
+private command demoBuildUI
+   create button "demo:start"
+   set the rect of button "demo:start" to "24,20,164,52"
+   set the label of button "demo:start" to "Start"
+   create button "demo:stop"
+   set the rect of button "demo:stop" to "176,20,316,52"
+   set the label of button "demo:stop" to "Stop"
+   create field "demo:url"
+   set the rect of field "demo:url" to "24,64,636,90"
+   set the lockText of field "demo:url" to true
+   set the opaque of field "demo:url" to true
+   set the textFont of field "demo:url" to "Courier"
+   set the dontWrap of field "demo:url" to true
+   put "(the .onion URL will appear here once published)" into field "demo:url"
+   create field "demo:out"
+   set the rect of field "demo:out" to "24,102,636,396"
+   set the lockText of field "demo:out" to true
+   set the opaque of field "demo:out" to true
+   set the textFont of field "demo:out" to "Courier"
+   set the vScrollbar of field "demo:out" to true
+   put empty into field "demo:out"
+end demoBuildUI
 
 on mouseUp
    local tName
    put the short name of the target into tName
-   if tName is "spike:start" then
-      spikeStart
-   else if tName is "spike:stop" then
-      spikeStop
+   if tName is "demo:start" then
+      demoStart
+   else if tName is "demo:stop" then
+      demoStop
    end if
 end mouseUp
 
-private command spikeStart
+private command demoStart
    local tErr
-   put empty into field "spike:out"
+   put empty into field "demo:out"
    put empty into sOnionAddress
-   spikeLog "connecting to the tor control port 127.0.0.1:" & kSpikeControlPort & " ..."
-   oxSetControlPort kSpikeControlPort
-   oxSetSocksPort kSpikeSocksPort
+   demoLog "connecting to the tor control port 127.0.0.1:" & kControlPort & " ..."
+   oxSetControlPort kControlPort
+   oxSetSocksPort kSocksPort
    oxConnectControl
    put the result into tErr
    if tErr is not empty then
-      spikeLog "control connect error: " & tErr
+      demoLog "control connect error: " & tErr
    end if
-end spikeStart
+end demoStart
 
--- Once the control port authenticates, start the external HTTP server and publish
--- an onion that forwards to it. OnionXT never touches the socket.
-on onStatus pKind, pInfo
-   if pKind is "control" then
-      if pInfo is "authenticated" then
-         spikeLog "control authenticated; starting the HTTPD Library + publishing the onion"
-         spikePublish
-      else if pInfo begins with "authfailed" or pInfo begins with "error" then
-         spikeLog "control error: " & pInfo
-      else
-         spikeLog "control: " & pInfo
-      end if
-   else if pKind is "service" then
-      put pInfo into sOnionAddress
-      put "http://" & pInfo & "/" into field "spike:url"
-      spikeLog "onion address published: " & pInfo
-   else if pKind is "serviceReady" then
-      spikeLog "REACHABLE - open  http://" & sOnionAddress & "/  in Tor Browser now"
-   end if
-end onStatus
-
-private command spikePublish
-   local tErr, tCaught
-   -- Start LiveCode's built-in HTTPD Library on the loopback port. It owns the
-   -- accept loop, parses each request, and hands us (socket id, request array).
-   --
-   -- IMPORTANT: this runs from onStatus, which OnionXT dispatches inside a try that
-   -- SWALLOWS callback errors. So wrap httpdStart ourselves, or a "handler not
-   -- found" (the built-in HTTPD Library absent in this OXT build) vanishes silently
-   -- and you just never see a .onion. Surface it.
-   try
-      httpdStart kSpikeLocalPort, "onHttpRequest"
-      put the result into tErr
-      put true into sHttpdStarted
-      spikeLog "httpdStart ok on 127.0.0.1:" & kSpikeLocalPort & "  (the result = [" & tErr & "])"
-   catch tCaught
-      spikeLog "httpdStart RAISED: " & tCaught
-      spikeLog "The built-in HTTPD Library is not available on this engine (README unknown A)."
-      spikeLog "Next: use the lchttpd fallback, or serve via OnionXT's own accept loop."
-      exit spikePublish
-   end try
-   -- VERIFY (B): the result above should reveal the port httpd bound. If it did NOT
-   -- bind kSpikeLocalPort (it can fall back to an ephemeral port when that port is
-   -- busy/reserved), publish THAT port instead of kSpikeLocalPort.
-   oxPublishService kSpikeVirtualPort, kSpikeLocalPort
-   put the result into sSvcHandle
+private command demoStop
    if sSvcHandle is an integer then
-      spikeLog "onion publishing (virtual port " & kSpikeVirtualPort & " -> 127.0.0.1:" & kSpikeLocalPort & ") ..."
-   else
-      spikeLog "publish failed: " & sSvcHandle
-   end if
-end spikePublish
-
--- The HTTPD Library request callback: (socket id, an array with method / resource
--- / parameters / headers / content). We enforce loopback, then reply.
-on onHttpRequest pSocket, pRequest
-   if not spikeIsLoopback(pSocket) then
-      -- SECURITY: `accept connections on port` binds all interfaces, so a LAN peer
-      -- can reach this port directly, bypassing Tor. Tor forwards from 127.0.0.1;
-      -- anything else is refused before a byte of response. (VERIFY C: that the
-      -- HTTPD Library tolerates us closing a peer it owns.)
-      spikeLog "rejected non-loopback visitor: " & pSocket
-      close socket pSocket
-      exit onHttpRequest
-   end if
-   spikeLog "served " & pRequest["method"] & " " & pRequest["resource"] & " to " & pSocket
-   httpdResponse pSocket, 200, spikePage(), "Content-Type: text/html; charset=utf-8"
-end onHttpRequest
-
-private function spikeIsLoopback pSocket
-   -- The accepted-socket id is "<peerhost>:<port>" (maybe with a |suffix). Accept
-   -- every loopback spelling; reject a routable peer. (Mirrors OnionXT's own guard.)
-   local tHost, tSaved
-   put the itemDelimiter into tSaved
-   set the itemDelimiter to ":"
-   put item 1 of pSocket into tHost
-   set the itemDelimiter to tSaved
-   if tHost is empty then
-      return true
-   end if
-   if tHost is "127.0.0.1" or tHost begins with "127." then
-      return true
-   end if
-   if tHost is "localhost" then
-      return true
-   end if
-   if "::1" is in pSocket then
-      return true
-   end if
-   return false
-end spikeIsLoopback
-
-private function spikePage
-   -- Single-quoted HTML attributes (livecodescript string literals are
-   -- double-quote-delimited with no escape).
-   local tH
-   put "<!doctype html>" & return into tH
-   put "<html><head><meta charset='utf-8'><title>OnionXT + HTTPD Library</title></head>" & return after tH
-   put "<body style='font-family:system-ui,sans-serif;max-width:38em;margin:3em auto;padding:0 1em;line-height:1.5'>" & return after tH
-   put "<h1>The composition works.</h1>" & return after tH
-   put "<p>This page is served by LiveCode's built-in <strong>HTTPD Library</strong>, published as a Tor v3 onion service by <strong>OnionXT</strong> (oxPublishService), inside an OpenXTalk app.</p>" & return after tH
-   put "<p>OnionXT provides the address and the tor forwarding; the HTTPD Library owns the socket and parses the request. Two libraries, one hassle-free onion host.</p>" & return after tH
-   put "</body></html>" & return after tH
-   return tH
-end spikePage
-
-private command spikeStop
-   if sHttpdStarted is true then
-      httpdStop
-      put false into sHttpdStarted
-      spikeLog "HTTPD Library stopped"
-   end if
-   if sSvcHandle is an integer then
-      oxRemoveService sSvcHandle
+      oxhStop sSvcHandle
       put empty into sSvcHandle
-      spikeLog "onion removed (DEL_ONION)"
+      demoLog "onion removed"
    end if
    oxDisconnectControl
-end spikeStop
+end demoStop
 
 on closeStack
-   spikeStop
+   demoStop
    oxShutdown
    pass closeStack
 end closeStack
 
-private command spikeLog pText
-   put pText & return after field "spike:out"
-   set the scroll of field "spike:out" to the formattedHeight of field "spike:out"
-end spikeLog
+private command demoLog pText
+   put pText & return after field "demo:out"
+   set the scroll of field "demo:out" to the formattedHeight of field "demo:out"
+end demoLog
