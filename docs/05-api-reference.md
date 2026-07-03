@@ -50,7 +50,8 @@ not know the app's framing).
 |---|---|---|
 | `oxCreateService pVirtualPort, pLocalPort` | command | `ADD_ONION NEW:ED25519-V3` mapping `pVirtualPort` -> `127.0.0.1:pLocalPort`, after ensuring a loopback listener is accepting on `pLocalPort`. Reports the full `<56>.onion` address and a service handle. |
 | `oxCreateServiceFromSeed pSeed, pVirtualPort, pLocalPort` | command | As above, but deterministic: composes SodiumXT `sxSignSeedToExpandedKey` (ABI >= 6) to turn the 32-byte `pSeed` into the ED25519-V3 expanded key, so the same seed always yields the same `.onion`. |
-| `oxRemoveService pService` | command | `DEL_ONION` and stop the listener. Idempotent. |
+| `oxPublishService pVirtualPort, pLocalPort` | command | Publish-only: `ADD_ONION` maps `pVirtualPort` -> `127.0.0.1:pLocalPort` but OnionXT does NOT start an accept loop, so an EXTERNAL server (e.g. LiveCode's built-in HTTPD Library) can own that port. Teardown `DEL_ONION`s but leaves that socket alone. The external server must enforce loopback itself (reject non-127.0.0.1 peers). |
+| `oxRemoveService pService` | command | `DEL_ONION` and stop the listener (a listener OnionXT owns; a publish-only service has none). Idempotent. |
 | `oxServiceAddress pService` | function | The `.onion` address of a published service. |
 | `oxSetPeerCallback pHandlerName` | command | Register the handler called when a peer connects to a published service (delivers a new inbound stream handle). |
 

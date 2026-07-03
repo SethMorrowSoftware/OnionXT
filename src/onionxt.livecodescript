@@ -955,6 +955,42 @@ command oxCreateServiceFromSeed pSeed, pVirtualPort, pLocalPort
    return tHandle
 end oxCreateServiceFromSeed
 
+command oxPublishService pVirtualPort, pLocalPort
+   -- Publish an onion whose virtual port Tor forwards to a loopback port that
+   -- SOMETHING ELSE is already accepting on (LiveCode's built-in HTTPD Library, or
+   -- any local server). Unlike oxCreateService, OnionXT does NOT start its own
+   -- accept loop: the external server owns the socket, parses the request, and
+   -- replies. Teardown DEL_ONIONs the service but leaves that socket alone. Reports
+   -- a service handle through `the result`; the .onion address arrives
+   -- asynchronously (status "service", oxServiceAddress) once ADD_ONION replies.
+   --
+   -- SECURITY (the caller's responsibility): `accept connections on port` usually
+   -- binds ALL interfaces, so the external server's local port may be reachable
+   -- from the LAN, bypassing Tor. The external server MUST enforce loopback itself
+   -- (reject any non-127.0.0.1 peer before responding), exactly as OnionXT's own
+   -- oxPeerAccepted does. Bind the server to loopback if it supports it.
+   local tError
+   put oxCheckServiceArgs(pVirtualPort, pLocalPort) into tError
+   if tError is not empty then
+      return tError
+   end if
+   local tHandle
+   put oxAllocHandle() into tHandle
+   put pVirtualPort into sServices[tHandle]["virtualPort"]
+   put pLocalPort into sServices[tHandle]["localPort"]
+   put empty into sServices[tHandle]["serviceID"]
+   put empty into sServices[tHandle]["address"]
+   put empty into sServices[tHandle]["privateKey"]
+   put false into sServices[tHandle]["ready"]
+   -- Mark it external so oxRemoveService DEL_ONIONs it but does not close the
+   -- socket (which OnionXT never opened; the external server owns it).
+   put true into sServices[tHandle]["external"]
+   -- No accept loop here (contrast oxStartService). Flags=Detach as in
+   -- oxCreateService, so a control-connection blip does not un-publish it.
+   oxCtlSend "ADD_ONION NEW:ED25519-V3 Flags=Detach Port=" & pVirtualPort & ",127.0.0.1:" & pLocalPort, "add_onion:" & tHandle
+   return tHandle
+end oxPublishService
+
 private function oxCheckServiceArgs pVirtualPort, pLocalPort
    if sControlState is not "authenticated" then
       return "OnionXT: connect and authenticate the control port first (oxConnectControl)"
@@ -1032,10 +1068,15 @@ command oxRemoveService pService
    if tServiceID is not empty and sControlState is "authenticated" then
       oxCtlSend "DEL_ONION " & tServiceID, "del_onion:" & pService
    end if
-   -- Stop accepting on the loopback port (one service per local port here).
-   if sLocalToService[tLocalPort] is pService then
-      oxSafeCloseSocket tLocalPort
-      delete variable sLocalToService[tLocalPort]
+   -- Stop accepting on the loopback port, but ONLY if WE own the listener
+   -- (oxCreateService / oxCreateServiceFromSeed). A publish-only service
+   -- (oxPublishService) forwards to a socket an external server owns; leave it
+   -- alone, or we would close it out from under that server.
+   if sServices[pService]["external"] is not true then
+      if sLocalToService[tLocalPort] is pService then
+         oxSafeCloseSocket tLocalPort
+         delete variable sLocalToService[tLocalPort]
+      end if
    end if
    delete variable sServices[pService]
 end oxRemoveService
