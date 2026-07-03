@@ -104,6 +104,7 @@ command oxhStream pStream, pEvent, pData
       put pData after sOxhReq[pStream]
       if the number of bytes of sOxhReq[pStream] > kOxhMaxRequest then
          put true into sOxhServed[pStream]
+         delete variable sOxhReq[pStream]     -- free the buffer now; do not hold it
          oxhSendBytes pStream, 413, textEncode("Request too large", "UTF-8"), "Content-Type: text/plain"
          exit oxhStream
       end if
@@ -202,13 +203,21 @@ end oxhParseHeaders
 -- ==========================================================================
 
 private command oxhHandle pStream, pData
-   local tHeadEnd, tHeaders, tKey, tBodyStart
+   local tHeadEnd, tHeaders, tKey, tBodyStart, tContentLen, tBodyEnd
    put oxhHeaderEnd(pData) into tHeadEnd
    put oxhParseHeaders(byte 1 to (tHeadEnd - 1) of pData) into tHeaders
-   -- Attach the raw body bytes for a POST handler that wants them.
+   -- Attach the raw body bytes for a POST handler, CAPPED to the declared
+   -- Content-Length. Without the cap, trailing or pipelined bytes in the same read
+   -- would bleed into __body and a form/upload route would parse the next request
+   -- as part of this body.
    put tHeadEnd + 4 into tBodyStart
-   if (the number of bytes of pData) >= tBodyStart then
-      put byte tBodyStart to -1 of pData into tHeaders["__body"]
+   put tHeaders["content-length"] into tContentLen
+   if tContentLen is an integer and tContentLen > 0 and (the number of bytes of pData) >= tBodyStart then
+      put tBodyStart + tContentLen - 1 into tBodyEnd
+      if tBodyEnd > the number of bytes of pData then
+         put the number of bytes of pData into tBodyEnd   -- defensive clamp
+      end if
+      put byte tBodyStart to tBodyEnd of pData into tHeaders["__body"]
    else
       put empty into tHeaders["__body"]
    end if
@@ -327,7 +336,13 @@ end oxhSendBytes
 
 command oxhClose pStream
    -- Deferred, idempotent close of a served connection (public: reached via send).
+   -- Clear BOTH per-stream tables here as the catch-all: oxCloseStream removes the
+   -- OnionXT stream, so no later socketClosed/"closed" event will arrive to clean
+   -- the HTTP state, and every response path (200/404/413/301/...) routes through
+   -- oxhSendBytes which schedules this. A double-delete on the normal path is a
+   -- harmless no-op.
    oxCloseStream pStream
+   delete variable sOxhReq[pStream]
    delete variable sOxhServed[pStream]
 end oxhClose
 
