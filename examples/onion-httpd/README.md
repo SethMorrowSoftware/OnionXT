@@ -42,6 +42,7 @@ pick a folder, and open the printed `http://<address>.onion/` in Tor Browser.
 | `oxhServeFiles pFolder` | share a folder: files + an auto directory listing |
 | `oxhSetRoot pFolder` | static-site mode: serve files, `/` -> `index.html`, no listing (safe default) |
 | `oxhRoute pMethod, pPath, pHandler` | a dynamic route; handler is `pHandler pStream, pRequest` |
+| `oxhUnroute pMethod, pPath` | remove a route (switch what a path serves at runtime) |
 | `oxhReply pStream, pCode, pBodyText, pHeaders` | reply from a route handler |
 | `oxhStop pService` | tear the onion down |
 

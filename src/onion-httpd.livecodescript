@@ -18,7 +18,8 @@
 -- A route handler:  command myHello pStream, pRequest ; oxhReply pStream, 200, "hi",
 --   "Content-Type: text/plain" ; end myHello
 --
--- Public API: oxhInit / oxhServe / oxhSetRoot / oxhRoute / oxhReply / oxhStop.
+-- Public API: oxhInit / oxhServe / oxhSetRoot / oxhServeFiles / oxhRoute /
+-- oxhUnroute / oxhReply / oxhStop.
 -- It composes OnionXT (ox*); it adds no cryptography and owns no long-lived socket
 -- of its own (OnionXT does). Public API `oxhCamelCase`, matching the family style.
 
@@ -73,6 +74,13 @@ command oxhRoute pMethod, pPath, pHandler
    -- the owner's script, called as: pHandler pStream, pRequest.
    put pHandler into sOxhRoutes[toUpper(pMethod) & space & pPath]
 end oxhRoute
+
+command oxhUnroute pMethod, pPath
+   -- Remove a route registered with oxhRoute. Lets an app switch what a path serves
+   -- at runtime (e.g. drop the "/" route so a shared folder's listing shows there
+   -- instead). Removing an unregistered route is a harmless no-op.
+   delete variable sOxhRoutes[toUpper(pMethod) & space & pPath]
+end oxhUnroute
 
 command oxhStop pService
    -- Tear down one served onion (DEL_ONION + stop OnionXT's listener).
