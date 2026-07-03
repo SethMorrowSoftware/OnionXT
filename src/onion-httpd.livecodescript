@@ -273,17 +273,19 @@ end oxhSendFile
 
 private function oxhListingHtml pDiskFolder, pUrlPath
    -- Build a directory-listing page for pDiskFolder (a disk path ending in "/"),
-   -- served at pUrlPath (a URL path ending in "/"). Names are HTML-escaped (a file
-   -- named "<script>" cannot inject) and path-encoded for the hrefs; links are
-   -- relative to pUrlPath, so a subfolder link browses in and ".." goes up.
-   local tSaved, tSavedID, tDetailed, tFolders, tLine, tName, tSize, tOut
+   -- served at pUrlPath (a URL path ending in "/"). Uses `the files` / `the folders`
+   -- (portable; `the detailedFiles` is not recognized on every OXT engine and is a
+   -- compile-time "bad factor" there). Names are HTML-escaped (a file named
+   -- "<script>" cannot inject) and path-encoded for the hrefs; links are relative
+   -- to pUrlPath, so a subfolder link browses in and ".." goes up.
+   local tSaved, tFiles, tFolders, tName, tOut
    put the defaultFolder into tSaved
    set the defaultFolder to pDiskFolder
-   put the detailedFiles into tDetailed
+   put the files into tFiles
    put the folders into tFolders
    set the defaultFolder to tSaved
    put "<!doctype html><html><head><meta charset='utf-8'><title>Shared files</title>" into tOut
-   put "<style>body{font-family:system-ui,sans-serif;max-width:44em;margin:2em auto;padding:0 1em}h1{font-size:1.2em}ul{list-style:none;padding:0}li{padding:.3em 0;border-bottom:1px solid #eee}a{text-decoration:none}.sz{color:#888;font-size:.85em;float:right}</style>" after tOut
+   put "<style>body{font-family:system-ui,sans-serif;max-width:44em;margin:2em auto;padding:0 1em}h1{font-size:1.2em}ul{list-style:none;padding:0}li{padding:.3em 0;border-bottom:1px solid #eee}a{text-decoration:none}</style>" after tOut
    put "</head><body><h1>Shared files: " & oxhHtmlEscape(pUrlPath) & "</h1><ul>" after tOut
    if pUrlPath is not "/" then
       put "<li><a href='../'>.. (up)</a></li>" after tOut
@@ -294,18 +296,12 @@ private function oxhListingHtml pDiskFolder, pUrlPath
       end if
       put "<li><a href='" & oxhPathEncode(tName) & "/'>" & oxhHtmlEscape(tName) & "/</a></li>" after tOut
    end repeat
-   put the itemDelimiter into tSavedID
-   set the itemDelimiter to comma
-   repeat for each line tLine in tDetailed
-      put urlDecode(item 1 of tLine) into tName     -- detailedFiles names are URL-encoded
-      put item 2 of tLine into tSize
-      put "<li><a href='" & oxhPathEncode(tName) & "'>" & oxhHtmlEscape(tName) & "</a>" after tOut
-      if tSize is an integer then
-         put "<span class='sz'>" & oxhHumanSize(tSize) & "</span>" after tOut
+   repeat for each line tName in tFiles
+      if tName is empty then
+         next repeat
       end if
-      put "</li>" after tOut
+      put "<li><a href='" & oxhPathEncode(tName) & "'>" & oxhHtmlEscape(tName) & "</a></li>" after tOut
    end repeat
-   set the itemDelimiter to tSavedID
    put "</ul></body></html>" after tOut
    return tOut
 end oxhListingHtml
@@ -474,20 +470,3 @@ private function oxhHtmlEscape pText
    replace quote with "&quot;" in tOut
    return tOut
 end oxhHtmlEscape
-
-private function oxhHumanSize pBytes
-   local tK, tM, tG
-   if pBytes < 1024 then
-      return pBytes & " B"
-   end if
-   put pBytes / 1024 into tK
-   if tK < 1024 then
-      return round(tK, 1) & " KB"
-   end if
-   put tK / 1024 into tM
-   if tM < 1024 then
-      return round(tM, 1) & " MB"
-   end if
-   put tM / 1024 into tG
-   return round(tG, 1) & " GB"
-end oxhHumanSize
