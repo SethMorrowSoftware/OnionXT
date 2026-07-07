@@ -176,7 +176,9 @@ def classify_opener(tokens, is_script):
         return "repeat"
     if first == "try":
         return "try"                      # try ... catch ... finally ... end try
-    if first in ("else", "catch", "finally"):
+    if first == "switch":
+        return "switch"                   # switch ... case ... default ... end switch
+    if first in ("else", "catch", "finally", "case", "default"):
         return None                       # continuation, not a new block
     if first == "if" and tokens[-1] == "then":
         return "if"                       # block if; single-line if has code after `then`
@@ -191,7 +193,7 @@ def check_balance(path, stripped_lines, is_script, problems):
             continue
         if tokens[0] == "end":
             what = tokens[1] if len(tokens) > 1 else ""
-            if what in ("if", "repeat", "unsafe", "try", "library", "module", "widget"):
+            if what in ("if", "repeat", "unsafe", "try", "switch", "library", "module", "widget"):
                 if not stack or stack[-1][0] != what:
                     top = stack[-1][0] if stack else "nothing"
                     problems.append(Problem(
