@@ -42,7 +42,7 @@ permissive license we can vendor and redistribute. It is the crypto core of a sh
 so the curve and hash code is battle-tested. CoinXT vendors a subset of its `.c` files plus a small shim
 and builds one shared library per platform. No autotools, no submodule tree.
 
-## Layout (planned)
+## Layout
 
 ```
 CoinXT/
@@ -50,19 +50,42 @@ CoinXT/
   SPEC.md                   what CoinXT is: the C/script split, the ABI contract, formats, security model
   IMPLEMENTATION-PLAN.md    the phased build order
   CLAUDE.md                 the operational guide + the FFI/C-ABI law (read before touching the shim)
+  MIGRATION.md              how to split CoinXT into its own repository (delete after the move)
+  templates/
+    CLAUDE.md               the portable xTalk/LiveCode/LCB lesson book (ALL the family's generic
+                            engine lessons; copy it to the root of any NEW xTalk project)
+  .github/workflows/ci.yml  the gates in CI (dormant until CoinXT is a repository root)
   native/
     coinxt.c                the C shim (cnx_ ABI over the vendored crypto)
+    build.sh                builds the shared library, and the ASan + UBSan self-test
+    MANIFEST.sha256         integrity pins: the vendored sources now; release binaries and the
+                            wordlist join in later phases
     vendor/                 the vendored trezor-crypto subset (MIT) + VENDOR.md + LICENSE
-    MANIFEST.sha256         hashes of the shipped binaries, vendored sources, and the wordlist
-  src/
+  src/                      (lands with the on-engine binding step)
     coinxt.lcb              the foreign-handler module (binds to cnx_*)
     coinxt.livecodescript   the public cx* API + the script-side encodings
   tools/
-    coin-kat.py             known-answer vectors (RFC 6979, BIP-32/39, BIP-173/350, EIP-55, Keccak)
-  examples/
+    coin-kat.py             known-answer vectors (builds the shim headless, drives it via ctypes)
+    check-livecodescript.py the static gate for .lcb / .livecodescript (carried verbatim)
+    check-docs-style.py     the house-style gate for .md (carried verbatim)
+  examples/                 (later phases)
     coinxt-demo.livecodescript    keygen, addresses, sign/verify, an HD wallet from a mnemonic
     coinxt-tests.livecodescript   a pure, offline self-test harness (sPass/sFail, KATs)
 ```
+
+## The gates (run before any commit)
+
+```sh
+python3 tools/check-livecodescript.py         # static gate for the script layer
+python3 tools/check-docs-style.py             # house-style gate for the docs
+python3 tools/coin-kat.py --check             # builds the shim, runs the known-answer vectors
+sh native/build.sh asan                       # ASan + UBSan native self-test
+( cd native && sha256sum -c MANIFEST.sha256 ) # vendored-source integrity
+```
+
+All five run in CI (`.github/workflows/ci.yml`). There is no headless way to compile or run
+`.livecodescript` / `.lcb` on OXT, so a script change additionally needs an on-engine pass; the honest
+status until then is "designed and statically reasoned" (see [CLAUDE.md](CLAUDE.md)).
 
 ## Status
 
@@ -78,8 +101,11 @@ design and the running as-built log. Every deterministic path is pinned to a pub
 and the "done" bar for a signing feature is that a CoinXT signature verifies in a mainstream external
 library, not just in CoinXT.
 
-This sub-project lives inside the OnionXT repository for now; it is an independent library (it does not
-depend on OnionXT) and may move to its own repo later.
+CoinXT is an independent library: it does not depend on OnionXT (the two compose at the documentation
+level only), and everything it needs (the static gates, the CI workflow, the portable engine-lesson
+book, the vendored sources and their manifest) lives inside this directory. It is currently staged
+inside the OnionXT repository and is ready to be split into its own repository; the exact procedure and
+the post-split checklist are in [MIGRATION.md](MIGRATION.md). (Remove this paragraph after the move.)
 
 ## A note on handling money
 

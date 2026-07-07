@@ -6,7 +6,8 @@ This file guides Claude Code (claude.ai/code) when working in the CoinXT sub-pro
 > split, the ABI contract, the formats, the security model). [IMPLEMENTATION-PLAN.md](IMPLEMENTATION-PLAN.md)
 > is the phased HOW. This file is the operational as-built record and the hard-won-lesson list, in the
 > same spirit as the sibling `CLAUDE.md` files (SodiumXT, OnionXT, TorrentXT). The portable
-> `../templates/CLAUDE.md` carries the generic xTalk/LCB engine lessons; this file adds what is specific
+> [templates/CLAUDE.md](templates/CLAUDE.md) (carried into this project so it survives the split into
+> its own repository) carries the generic xTalk/LCB engine lessons; this file adds what is specific
 > to CoinXT: a native crypto shim that handles money.
 
 House style: no em-dashes (hyphens, commas, colons, parentheses). ASCII only in `.lcb` /
@@ -69,10 +70,11 @@ CoinXT C shim (cnx_)   native/coinxt.c  +  vendored trezor-crypto subset
 
 ## Commands
 
-**Static gate for the script layer** (carried from OnionXT / SodiumXT):
+**Static gate for the script layer** (carried verbatim from OnionXT / SodiumXT; the checkers ship in
+THIS project's `tools/` so CoinXT is self-contained when it moves to its own repository):
 ```sh
-python3 ../tools/check-livecodescript.py    # or the repo-root copy; keep one source of truth
-python3 ../tools/check-docs-style.py
+python3 tools/check-livecodescript.py
+python3 tools/check-docs-style.py
 ```
 It checks smart/curly quotes, em/en dashes, block balance, constants-before-use, the prefixed-token
 shadow trap, the `put ... into ... after` malformation, and (for `.lcb`) a missing
@@ -176,7 +178,7 @@ The single most expensive thing the family has learned. Change nothing here with
 - Pin every encoding to its public vector (BIP-173/350 including INVALID cases, EIP-55 examples, the RLP
   yellow-paper examples).
 
-## LiveCodeScript / LCB / OXT gotchas (carried; see ../templates/CLAUDE.md for the full list)
+## LiveCodeScript / LCB / OXT gotchas (carried; see [templates/CLAUDE.md](templates/CLAUDE.md) for the full list)
 
 The generic list applies verbatim. The ones most likely to bite CoinXT:
 - No smart/curly quotes anywhere (fails OXT compilation).
@@ -242,3 +244,21 @@ Still to do in phase 1: nothing native-side for hashes; the `.lcb` foreign modul
 is written and confirmed in a later step, since it needs a real OXT engine to load. Next up (phase 2):
 the secp256k1 curve surface (keypair, ECDSA, recoverable, recover, ECDH), with a signature that must
 verify in an independent library.
+
+**Repo-prep - self-contained for the split (2026-07-07).** CoinXT no longer reaches outside its own
+directory for anything; it is ready to become the root of its own repository (the procedure and the
+post-split checklist are in [MIGRATION.md](MIGRATION.md)):
+
+- The static gates (`tools/check-livecodescript.py`, `tools/check-docs-style.py`) are carried verbatim
+  into `tools/`, alongside `tools/coin-kat.py`. Every `../` reference in the docs was retargeted.
+- The portable xTalk/LCB lesson book is carried at `templates/CLAUDE.md`, synced byte-identical with
+  OnionXT's copy at fork time (including the newest on-engine lessons: the `the detailedFiles` "bad
+  factor", the unchecked `accept connections` bind failure, the CRLF returned by `read ... until crlf`,
+  and the streaming no-quantifier read). After the split each repo maintains its own copy, the family
+  pattern; keep appending to the living-gotcha log.
+- CI ships at `.github/workflows/ci.yml`: both static gates, the vendored-source `MANIFEST.sha256`
+  check, `coin-kat.py --check` (builds the shim from source, drives it via ctypes), and the ASan/UBSan
+  self-test. It is dormant while CoinXT is nested (GitHub reads only the repo root's `.github/`) and
+  goes live on the split.
+- `native/MANIFEST.sha256` pins every vendored trezor-crypto file now, ahead of the packaging phase
+  (release binaries join it there). Refresh it in the same change as any vendor re-pin.
