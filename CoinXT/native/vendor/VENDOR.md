@@ -24,5 +24,17 @@ decide to keep any encoding native rather than in script.
 - **Verbatim only.** Do not edit a vendored file in place. If a patch is ever unavoidable, record it here
   with a diff and a reason, and hash the patched file in `MANIFEST.sha256`.
 - **Re-pin deliberately.** Bumping the upstream commit is its own change: update the SHA above, re-run
-  `tools/coin-kat.py`, and note anything that shifted.
+  `tools/coin-kat.py`, refresh `../MANIFEST.sha256`, and note anything that shifted.
 - The MIT `LICENSE` ships alongside these files (redistribution requirement).
+
+## Integrity
+
+Every vendored file (and, from the packaging phase on, every shipped release binary) is pinned in
+`../MANIFEST.sha256`, checked in CI. Verify locally with:
+
+```sh
+cd native && sha256sum -c MANIFEST.sha256
+```
+
+Any legitimate change to a vendored file (a re-pin, a recorded patch) refreshes the manifest in the
+SAME change; a mismatch anywhere else means the tree is not what was reviewed.
